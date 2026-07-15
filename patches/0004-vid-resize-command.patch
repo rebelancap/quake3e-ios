@@ -1,0 +1,109 @@
+diff --git a/code/renderervk/tr_init.c b/code/renderervk/tr_init.c
+index d7662884..20f4ba10 100644
+--- a/code/renderervk/tr_init.c
++++ b/code/renderervk/tr_init.c
+@@ -1482,6 +1482,17 @@ static void RE_SyncRender( void )
+ }
+ 
+ 
++#ifdef USE_VULKAN
++// vid_resize <width> <height> — lightweight swapchain/attachment resize for
++// externally-windowed ports (e.g. the visionOS window), avoiding vid_restart.
++static void RE_Resize_f( void )
++{
++	if ( ri.Cmd_Argc() < 3 )
++		return;
++	vk_resize( atoi( ri.Cmd_Argv( 1 ) ), atoi( ri.Cmd_Argv( 2 ) ) );
++}
++#endif
++
+ /*
+ ===============
+ R_Register
+@@ -1500,6 +1511,7 @@ static void R_Register( void )
+ 	ri.Cmd_AddCommand( "gfxinfo", GfxInfo_f );
+ #ifdef USE_VULKAN
+ 	ri.Cmd_AddCommand( "vkinfo", VkInfo_f );
++	ri.Cmd_AddCommand( "vid_resize", RE_Resize_f );
+ #endif
+ 
+ 	//
+@@ -1954,6 +1966,7 @@ static void RE_Shutdown( refShutdownCode_t code ) {
+ 	ri.Cmd_RemoveCommand( "shaderstate" );
+ #ifdef USE_VULKAN
+ 	ri.Cmd_RemoveCommand( "vkinfo" );
++	ri.Cmd_RemoveCommand( "vid_resize" );
+ #endif
+ 
+ 	//if ( tr.registered ) {
+diff --git a/code/renderervk/vk.c b/code/renderervk/vk.c
+index bf0e6382..2e296a35 100644
+--- a/code/renderervk/vk.c
++++ b/code/renderervk/vk.c
+@@ -498,6 +498,14 @@ static void vk_create_swapchain( VkPhysicalDevice physical_device, VkDevice devi
+ 		image_extent.height = MIN( surface_caps.maxImageExtent.height, MAX( surface_caps.minImageExtent.height, (uint32_t) glConfig.vidHeight ) );
+ 	}
+ 
++	// Externally-windowed ports (visionOS) resize the surface freely, and the
++	// present blit's viewport is driven by gls.windowWidth/Height. Pin those to
++	// the actual swapchain extent on every (re)create so a resize never leaves an
++	// uncovered strip on the right/bottom edge (the swapchain follows the live
++	// window via currentExtent; gls.window* must track it exactly).
++	gls.windowWidth = image_extent.width;
++	gls.windowHeight = image_extent.height;
++
+ 	vk.clearAttachment = qtrue;
+ 
+ 	if ( !vk.fboActive ) {
+@@ -3903,6 +3911,35 @@ static void vk_restart_swapchain( const char *funcname, VkResult res )
+ }
+ 
+ 
++static void vk_set_render_scale( void );
++
++// Lightweight window resize for externally-windowed ports (visionOS). The QVM
++// cgame caches glconfig at CG_Init and never refetches it, so CHANGING the render
++// resolution here leaves it drawing at the old size — crop when the window
++// shrinks, black when it grows; only a full vid_restart re-inits it. Instead keep
++// the render resolution (glConfig) FIXED and move only the window/swapchain size,
++// then let the engine's built-in render-scale blit the fixed-res render to fill
++// the new window (aspect-preserved via r_renderScale). No cgame re-init, no
++// VM/map/texture reload — just a swapchain recreate.  <width,height> is the new
++// window (drawable) size in pixels.
++void vk_resize( int width, int height )
++{
++	if ( width < 16 || height < 16 )
++		return;
++	if ( width == gls.windowWidth && height == gls.windowHeight )
++		return;
++	gls.windowWidth = width;
++	gls.windowHeight = height;
++	// recompute the present-blit scale + letterbox for the new window vs the
++	// (unchanged) render resolution, then bake it into recreated pipelines.
++	vk.blitFilter = GL_NEAREST;
++	vk.windowAdjusted = qfalse;
++	vk.blitX0 = vk.blitY0 = 0;
++	vk_set_render_scale();
++	vk_restart_swapchain( "vk_resize", VK_SUCCESS );
++}
++
++
+ static void vk_set_render_scale( void )
+ {
+ 	if ( gls.windowWidth != glConfig.vidWidth || gls.windowHeight != glConfig.vidHeight )
+diff --git a/code/renderervk/vk.h b/code/renderervk/vk.h
+index 1a716bb7..b7f6bf7e 100644
+--- a/code/renderervk/vk.h
++++ b/code/renderervk/vk.h
+@@ -237,6 +237,11 @@ typedef struct vkUniform_s {
+ // After calling this function we get fully functional vulkan subsystem.
+ void vk_initialize( void );
+ 
++// Lightweight window resize (externally-windowed ports, e.g. visionOS): set the
++// new render/window dimensions and recreate only the swapchain + attachments +
++// framebuffers (keeps the pipeline cache — no recompile, no vid_restart).
++void vk_resize( int width, int height );
++
+ // Called after initialization or renderer restart
+ void vk_init_descriptors( void );
+ 

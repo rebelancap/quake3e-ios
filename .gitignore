@@ -1,0 +1,31 @@
+# Pristine upstream clone — pinned by upstream.pin, never tracked here.
+vendor/
+
+# User game data (copied from the OneDrive master) — never committed.
+gamedata/
+
+# Build trees — regenerated from scripts.
+build/
+
+# Per-scenario engine write sandboxes (configs, logs, demos written at runtime).
+artifacts/runs/
+
+.DS_Store
+ios/icon/generated/
+ota/
+
+# Development process docs — kept local, never published
+CLAUDE.md
+DECISIONS.md
+MEASUREMENTS.md
+QUESTIONS.md
+FABLE_3D*.md
+NOTES-FROM-VKQUAKE.md
+PUBLISH-GUIDE-FROM-VKQUAKE.md
+docs/pacing-design.md
+docs/upstream-map.md
+docs/upstream-pr-0002.md
+# personal OTA/signing infra (tailnet host)
+scripts/publish-ota.sh
+# dev measurement captures
+artifacts/

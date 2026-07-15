@@ -1,0 +1,29 @@
+--- a/code/client/cl_input.c
++++ b/code/client/cl_input.c
+@@ -417,17 +417,16 @@
+ 		anglespeed = 0.001 * cls.frametime;
+ 	}
+ 
+-	if ( !in_strafe.active ) {
+-		cl.viewangles[YAW] += anglespeed * cl_yawspeed->value * cl.joystickAxis[AXIS_SIDE];
+-	} else {
+-		cmd->rightmove = ClampCharMove( cmd->rightmove + cl.joystickAxis[AXIS_SIDE] );
+-	}
++	// quake3e-ios overlay patch 0003: AXIS_SIDE/AXIS_FORWARD are always
++	// movement (dual-stick semantics). The 1999 joystick-turns-view
++	// behavior is never wanted by a touch/gamepad layer that does its
++	// own look handling via mouse deltas; +strafe/+mlook coupling here
++	// would also corrupt simultaneous mouse-look input.
++	cmd->rightmove = ClampCharMove( cmd->rightmove + cl.joystickAxis[AXIS_SIDE] );
++	cmd->forwardmove = ClampCharMove( cmd->forwardmove + cl.joystickAxis[AXIS_FORWARD] );
+ 
+-	if ( in_mlooking ) {
+-		cl.viewangles[PITCH] += anglespeed * cl_pitchspeed->value * cl.joystickAxis[AXIS_FORWARD];
+-	} else {
+-		cmd->forwardmove = ClampCharMove( cmd->forwardmove + cl.joystickAxis[AXIS_FORWARD] );
+-	}
++	cl.viewangles[YAW] += anglespeed * cl_yawspeed->value * cl.joystickAxis[AXIS_YAW];
++	cl.viewangles[PITCH] += anglespeed * cl_pitchspeed->value * cl.joystickAxis[AXIS_PITCH];
+ 
+ 	cmd->upmove = ClampCharMove( cmd->upmove + cl.joystickAxis[AXIS_UP] );
+ }

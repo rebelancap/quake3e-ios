@@ -1,0 +1,120 @@
+name: Quake3e
+options:
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  Quake3e:
+    type: application
+    platform: iOS
+    sources:
+      - shell
+      - path: icon/generated
+        optional: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rebelancap.quake3e
+        DEVELOPMENT_TEAM: 57G8J46Z2T
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Info.plist
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/../build/src-overlay/code"
+          - "$(SRCROOT)/../vendor/moltenvk-ios/MoltenVK/MoltenVK/include"
+        LIBRARY_SEARCH_PATHS:
+          - "$(SRCROOT)/../build/ios"
+          - "$(SRCROOT)/../build/ios-deps/prefix/lib"
+        OTHER_LDFLAGS:
+          - "-lq3e"
+          - "-lc++"
+          - "-lcurl"
+          - "-lz"
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "NO_VM_COMPILED=1"
+          - "USE_VULKAN_API=1"
+          - "USE_OGG_VORBIS=1"
+        ENABLE_BITCODE: NO
+        CLANG_ENABLE_MODULES: YES
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: shell/ios_shortcuts.h
+    dependencies:
+      - framework: ../vendor/moltenvk-ios/MoltenVK/MoltenVK/static/MoltenVK.xcframework
+        embed: false
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: IOSurface.framework
+      - sdk: CoreGraphics.framework
+      - sdk: UIKit.framework
+      - sdk: Foundation.framework
+      - sdk: CoreVideo.framework
+      - sdk: AudioToolbox.framework
+      - sdk: AVFoundation.framework
+      - sdk: GameController.framework
+      - sdk: CoreMotion.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+
+  # Native visionOS 2D-window build. Shares the engine (libq3e-xros.a) and all
+  # shell code with the iOS target EXCEPT AppShell.m (iOS lifecycle) — the
+  # visionOS window/lifecycle lives in shell-visionos/. The iOS target above is
+  # untouched. Built by scripts/build-visionos.sh.
+  Quake3e-visionOS:
+    type: application
+    platform: visionOS
+    sources:
+      - path: shell
+        excludes:
+          - "AppShell.m"
+          - "Q3EIntents.swift"
+      - path: shell-visionos
+      - path: Assets-visionos.xcassets
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rebelancap.quake3e
+        PRODUCT_NAME: Quake3e
+        DEVELOPMENT_TEAM: 57G8J46Z2T
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "7"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Info-visionos.plist
+        XROS_DEPLOYMENT_TARGET: "1.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/../build/src-overlay/code"
+          - "$(SRCROOT)/../vendor/moltenvk-ios/MoltenVK/MoltenVK/include"
+        LIBRARY_SEARCH_PATHS:
+          - "$(SRCROOT)/../build/visionos"
+          - "$(SRCROOT)/../build/visionos-deps/prefix/lib"
+        OTHER_LDFLAGS:
+          - "-lq3e-xros"
+          - "-lc++"
+          - "-lcurl"
+          - "-lz"
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "NO_VM_COMPILED=1"
+          - "USE_VULKAN_API=1"
+          - "USE_OGG_VORBIS=1"
+        ENABLE_BITCODE: NO
+        CLANG_ENABLE_MODULES: YES
+        SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: shell-visionos/Q3EVision-Bridging-Header.h
+    dependencies:
+      - framework: ../vendor/moltenvk/MoltenVK.xcframework
+        embed: false
+      - sdk: Metal.framework
+      - sdk: CompositorServices.framework
+      - sdk: ARKit.framework
+      - sdk: QuartzCore.framework
+      - sdk: IOSurface.framework
+      - sdk: CoreGraphics.framework
+      - sdk: UIKit.framework
+      - sdk: SwiftUI.framework
+      - sdk: Foundation.framework
+      - sdk: CoreVideo.framework
+      - sdk: AudioToolbox.framework
+      - sdk: AVFoundation.framework
+      - sdk: GameController.framework
+      - sdk: CoreMotion.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework

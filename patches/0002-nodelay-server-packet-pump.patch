@@ -1,0 +1,26 @@
+--- a/code/qcommon/common.c
++++ b/code/qcommon/common.c
+@@ -4327,6 +4327,23 @@
+ 		NET_Sleep( sleepMsec * 1000 - 500 );
+ 	} while( Com_TimeVal( minMsec ) );
+ 
++	// quake3e-ios overlay patch 0002: an externally paced shell (iOS
++	// CADisplayLink) calls Com_Frame(qtrue); the wait loop above is then
++	// skipped entirely — but it is the ONLY caller of BOTH network pumps:
++	// NET_Sleep's select/recvfrom chain (the sole inbound read path —
++	// without it, arriving packets rot unread in the socket buffer and a
++	// connecting client waits on "AWAITING CHALLENGE" forever; observed
++	// on-device) and SV_SendQueuedPackets (fragmented gamestates and
++	// downloads on a listen server; the loopback client parks at
++	// CA_PRIMED). Pump both once per frame: NET_Sleep(0) is a
++	// non-blocking poll whose NET_Event drains every pending packet.
++	if ( noDelay ) {
++		NET_Sleep( 0 );
++		if ( com_sv_running->integer ) {
++			SV_SendQueuedPackets();
++		}
++	}
++
+ 	lastTime = com_frameTime;
+ 	com_frameTime = Com_EventLoop();
+ 	realMsec = com_frameTime - lastTime;
