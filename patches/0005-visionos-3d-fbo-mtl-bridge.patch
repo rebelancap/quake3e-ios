@@ -1,0 +1,31 @@
+diff --git a/code/renderervk/vk.c b/code/renderervk/vk.c
+index 2e296a3..53b4a75 100644
+--- a/code/renderervk/vk.c
++++ b/code/renderervk/vk.c
+@@ -7705,6 +7705,26 @@ void vk_present_frame( void )
+ }
+ 
+ 
++// visionOS 3D bridge: hand the offscreen FBO color image to the CompositorServices
++// immersive layer as a Metal texture. Under MoltenVK a VkImage's backing store IS a
++// MTLTexture, so the compositor samples the rendered game frame with no copy and no
++// second renderer. Valid only with r_fbo (forced on for this port) and while the
++// engine renders off-screen (gw_minimized) so nothing else touches color_image.
++//
++// Returns an id<MTLTexture> as an opaque pointer (the ObjC shell __bridge-casts it
++// back); NULL if the FBO is inactive. ABI note: id<MTLTexture>* is a plain pointer, so
++// we declare the MoltenVK entry with a void* out-param and keep this file pure C.
++extern void vkGetMTLTextureMVK( VkImage image, void *pMTLTexture );
++void *VK_Get3DColorMTLTexture( void )
++{
++	void *mtlTexture = NULL;
++	if ( vk.color_image == VK_NULL_HANDLE )
++		return NULL;
++	vkGetMTLTextureMVK( vk.color_image, &mtlTexture );
++	return mtlTexture;
++}
++
++
+ static qboolean is_bgr( VkFormat format ) {
+ 	switch ( format ) {
+ 		case VK_FORMAT_B8G8R8A8_UNORM:

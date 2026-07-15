@@ -1,0 +1,87 @@
+--- a/code/client/cl_main.c
++++ b/code/client/cl_main.c
+@@ -674,7 +674,60 @@
+ 
+ =======================================================================
+ */
++
++/*
++=======================================================================
++TIMEDEMO FRAME-TIME PERCENTILES (quake3e-ios overlay patch 0001)
++
++Stock timedemo prints only frames/seconds/mean-fps. The port's
++measurement protocol needs frame-time percentiles. Stamps are
++RAM-buffered during the run and reported once at completion: no
++allocation, printing, or I/O inside the measured window.
++=======================================================================
++*/
++
++#define FT_MAX_FRAMES 262144
++
++static int64_t ft_prevStamp;
++static uint32_t ft_deltas[FT_MAX_FRAMES];
++static int ft_count;
++
++void CL_TimedemoStamp( void ) {
++	const int64_t now = Sys_Microseconds();
++	if ( ft_prevStamp != 0 && ft_count < FT_MAX_FRAMES ) {
++		ft_deltas[ft_count++] = (uint32_t)( now - ft_prevStamp );
++	}
++	ft_prevStamp = now;
++}
++
++static int ft_cmp( const void *a, const void *b ) {
++	const uint32_t ua = *(const uint32_t *)a;
++	const uint32_t ub = *(const uint32_t *)b;
++	return ( ua > ub ) - ( ua < ub );
++}
++
++static void CL_TimedemoReport( void ) {
++	int64_t sum = 0;
++	int i;
++
++	if ( ft_count > 0 ) {
++		qsort( ft_deltas, ft_count, sizeof( ft_deltas[0] ), ft_cmp );
++		for ( i = 0; i < ft_count; i++ ) {
++			sum += ft_deltas[i];
++		}
++		Com_Printf( "TIMEDEMO_FT: n=%i avg=%.3f p50=%.3f p95=%.3f p99=%.3f max=%.3f (ms)\n",
++			ft_count,
++			(double)sum / ft_count / 1000.0,
++			ft_deltas[ft_count / 2] / 1000.0,
++			ft_deltas[( ft_count * 95 ) / 100] / 1000.0,
++			ft_deltas[( ft_count * 99 ) / 100] / 1000.0,
++			ft_deltas[ft_count - 1] / 1000.0 );
++	}
++	ft_prevStamp = 0;
++	ft_count = 0;
++}
+ 
++
+ /*
+ =================
+ CL_DemoCompleted
+@@ -689,6 +742,7 @@
+ 			Com_Printf( "%i frames, %3.*f seconds: %3.1f fps\n", clc.timeDemoFrames,
+ 			time > 10000 ? 1 : 2, time/1000.0, clc.timeDemoFrames*1000.0 / time );
+ 		}
++		CL_TimedemoReport();
+ 	}
+ 
+ 	CL_Disconnect( qtrue );
+--- a/code/client/cl_cgame.c
++++ b/code/client/cl_cgame.c
+@@ -1208,11 +1208,13 @@
+ 	// while a normal demo may have different time samples
+ 	// each time it is played back
+ 	if ( com_timedemo->integer ) {
++		extern void CL_TimedemoStamp( void );
+ 		if ( !clc.timeDemoStart ) {
+ 			clc.timeDemoStart = Sys_Milliseconds();
+ 		}
+ 		clc.timeDemoFrames++;
+ 		cl.serverTime = clc.timeDemoBaseTime + clc.timeDemoFrames * 50;
++		CL_TimedemoStamp();
+ 	}
+ 
+ 	//while ( cl.serverTime >= cl.snap.serverTime ) {

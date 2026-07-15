@@ -1,0 +1,6 @@
+# Pinned upstream — the single source of truth for the vendored engine.
+# Phase 1 converts vendor/Quake3e to a git submodule at this exact state.
+url = https://github.com/ec-/Quake3e
+commit = 896bc726f644818b56b1ed3cff1730f98068b340
+date = 2026-07-07 00:53:09 +0300
+subject = Vulkan: corrected initial swapchain image layout transition (write-after-read hazard)

@@ -1,0 +1,137 @@
+diff --git a/code/renderervk/vk.c b/code/renderervk/vk.c
+--- a/code/renderervk/vk.c
++++ b/code/renderervk/vk.c
+@@ -3262,6 +3262,18 @@ static void vk_clear_attachment_pool( void )
+ }
+ 
+ 
++// visionOS 3D stereo state (patch 0006). vk_stereo3d_eye: 0=off (normal 2D), 1=left,
++// 2=right — set per off-screen frame by the shell. vk_stereo3d_sep: parallax divisor
++// (larger = subtler depth; IPD/comfort control). tr_main.c reads both for the view
++// offset. vk_stereo3d_eye_done latches which eye color_image holds after each frame, so
++// the immersive compositor copies it into the matching per-eye texture (on its own
++// Metal queue — see VK_Get3DEyeDone).
++int vk_stereo3d_eye = 0;
++int vk_stereo3d_eye_done = 0;
++int vk_stereo3d_frames = 0;
++float vk_stereo3d_sep = 20.0f;   // parallax divisor; larger = gentler depth (comfort)
++
++
+ static void vk_alloc_attachments( void )
+ {
+ 	VkImageViewCreateInfo view_desc;
+@@ -7590,6 +7602,17 @@ void vk_end_frame( void )
+ 
+ 	vk_end_render_pass();
+ 
++	// visionOS 3D stereo (patch 0006): latch which eye this finished off-screen frame
++	// holds, so the immersive compositor can copy color_image into the matching per-eye
++	// Metal texture (the copy happens on the compositor's own Metal queue, avoiding the
++	// cross-queue hazard a Vulkan-side blit here would create). vk_stereo3d_frames counts
++	// minimized renders — a liveness signal (is color_image actually being updated?).
++	if ( ri.CL_IsMinimized() ) {
++		vk_stereo3d_frames++;
++		if ( vk_stereo3d_eye >= 1 && vk_stereo3d_eye <= 2 )
++			vk_stereo3d_eye_done = vk_stereo3d_eye;
++	}
++
+ 	VK_CHECK( qvkEndCommandBuffer( vk.cmd->command_buffer ) );
+ 
+ 	submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+@@ -7724,6 +7747,28 @@ void *VK_Get3DColorMTLTexture( void )
+ 	return mtlTexture;
+ }
+ 
++// visionOS 3D stereo (patch 0006). The shell selects the eye for each off-screen frame
++// and tunes the parallax separation (IPD/comfort); VK_Get3DColorMTLTexture returns the
++// just-rendered frame and VK_Get3DEyeDone reports which eye it holds, so the immersive
++// compositor copies it into the matching per-eye texture on its own Metal queue.
++void VK_Set3DEye( int eye )          { vk_stereo3d_eye = eye; }
++void VK_Set3DSeparation( float sep ) { if ( sep > 0.1f ) vk_stereo3d_sep = sep; }
++int  VK_Get3DEye( void )             { return vk_stereo3d_eye; }
++int  VK_Get3DEyeDone( void )         { return vk_stereo3d_eye_done; }
++int  VK_Get3DFrames( void )          { return vk_stereo3d_frames; }
++
++// The engine's MoltenVK MTLCommandQueue. The immersive compositor renders on THIS same
++// queue so its copy/sample of color_image serializes with the engine's frame renders —
++// Metal hazard-tracks the shared texture, avoiding the cross-queue hang a separate queue
++// caused. id<MTLCommandQueue>* is a plain pointer, so declare it void* to stay pure C.
++extern void vkGetMTLCommandQueueMVK( VkQueue queue, void *pMTLQueue );
++void *VK_GetMTLCommandQueue( void )
++{
++	void *mtlQueue = NULL;
++	vkGetMTLCommandQueueMVK( vk.queue, &mtlQueue );
++	return mtlQueue;
++}
++
+ 
+ static qboolean is_bgr( VkFormat format ) {
+ 	switch ( format ) {
+diff --git a/code/renderervk/tr_main.c b/code/renderervk/tr_main.c
+--- a/code/renderervk/tr_main.c
++++ b/code/renderervk/tr_main.c
+@@ -558,6 +558,11 @@ static void R_SetupFrustum( viewParms_t *dest, float xmin, float xmax, float yma
+ R_SetupProjection
+ ===============
+ */
++#ifdef USE_VULKAN
++extern int   vk_stereo3d_eye;   // visionOS 3D stereo (patch 0006): 0=off,1=left,2=right
++extern float vk_stereo3d_sep;   // parallax divisor (larger = subtler depth)
++#endif
++
+ void R_SetupProjection( viewParms_t *dest, float zProj, qboolean computeFrustum )
+ {
+ 	float	xmin, xmax, ymin, ymax;
+@@ -578,6 +583,19 @@ void R_SetupProjection( viewParms_t *dest, float zProj, qboolean computeFrustum
+ 			stereoSep = 0;
+ 	}
+ 
++#ifdef USE_VULKAN
++	// visionOS 3D stereo (patch 0006): the shell renders alternating eyes off-screen
++	// (STEREO_CENTER frames) and asks for a parallax offset via vk_stereo3d_eye. Apply
++	// the same asymmetric-frustum shift the desktop stereo path uses.
++	if ( stereoSep == 0 && vk_stereo3d_eye )
++	{
++		if ( vk_stereo3d_eye == 1 )
++			stereoSep = zProj / vk_stereo3d_sep;
++		else if ( vk_stereo3d_eye == 2 )
++			stereoSep = zProj / -vk_stereo3d_sep;
++	}
++#endif
++
+ 	ymax = zProj * tan(dest->fovY * M_PI / 360.0f);
+ 	ymin = -ymax;
+ 
+diff --git a/code/renderervk/tr_cmds.c b/code/renderervk/tr_cmds.c
+--- a/code/renderervk/tr_cmds.c
++++ b/code/renderervk/tr_cmds.c
+@@ -74,6 +74,10 @@ static void R_PerformanceCounters( void ) {
+ R_IssueRenderCommands
+ ====================
+ */
++#ifdef USE_VULKAN
++extern int vk_stereo3d_eye;   // visionOS 3D stereo (patch 0006): 0=off, 1/2=eye
++#endif
++
+ static void R_IssueRenderCommands( void ) {
+ 	renderCommandList_t	*cmdList;
+ 
+@@ -86,8 +90,16 @@ static void R_IssueRenderCommands( void ) {
+ 	cmdList->used = 0;
+ 
+ 	if ( backEnd.screenshotMask == 0 ) {
+-		if ( ri.CL_IsMinimized() )
+-			return; // skip backend when minimized
++		// visionOS 3D stereo (patch 0006): in 3D mode the engine runs permanently
++		// "minimized" (gw_minimized) so it renders to the FBO instead of the hidden
++		// window. Upstream skips the backend entirely when minimized (power saving) —
++		// that would freeze color_image, so keep rendering whenever an eye is selected.
++		if ( ri.CL_IsMinimized()
++#ifdef USE_VULKAN
++			&& !vk_stereo3d_eye
++#endif
++			)
++			return; // skip backend when minimized (but not while driving 3D)
+ 		if ( backEnd.throttle )
+ 			return; // or throttled on demand
+ 	} else {

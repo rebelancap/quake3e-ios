@@ -1,0 +1,289 @@
+--- a/code/client/cl_scrn.c
++++ b/code/client/cl_scrn.c
+@@ -638,7 +638,11 @@
+ 	if ( uivm )
+ 	{
+ 		// XXX
+-		int in_anaglyphMode = Cvar_VariableIntegerValue("r_anaglyphMode");
++		// visionOS 3D stereo (patch 0007): r_stereo3d drives the native two-field
++		// path — both eyes rendered every host frame (same game time, eye-offset
++		// projections only); the vk backend snapshots each field per-eye.
++		int in_anaglyphMode = Cvar_VariableIntegerValue("r_anaglyphMode")
++			|| Cvar_VariableIntegerValue("r_stereo3d");
+ 		// if running in stereo, we need to draw the frame twice
+ 		if ( cls.glconfig.stereoEnabled || in_anaglyphMode) {
+ 			SCR_DrawScreenField( STEREO_LEFT );
+--- a/code/renderervk/tr_cmds.c
++++ b/code/renderervk/tr_cmds.c
+@@ -76,6 +76,7 @@
+ */
+ #ifdef USE_VULKAN
+ extern int vk_stereo3d_eye;   // visionOS 3D stereo (patch 0006): 0=off, 1/2=eye
++extern int vk_stereo3d_both;  // visionOS 3D stereo (patch 0007): both-eyes-per-frame
+ #endif
+ 
+ static void R_IssueRenderCommands( void ) {
+@@ -96,7 +97,7 @@
+ 		// that would freeze color_image, so keep rendering whenever an eye is selected.
+ 		if ( ri.CL_IsMinimized()
+ #ifdef USE_VULKAN
+-			&& !vk_stereo3d_eye
++			&& !vk_stereo3d_eye && !vk_stereo3d_both
+ #endif
+ 			)
+ 			return; // skip backend when minimized (but not while driving 3D)
+@@ -312,6 +313,12 @@
+ 
+ #ifdef USE_VULKAN
+ 	backEnd.doneBloom = qfalse;
++
++	// visionOS 3D stereo (patch 0007): latch the both-eyes mode once per HOST frame
++	// (never between the two fields of one frame) so a mid-frame cvar flip can't
++	// tear the stereo state the backend and the field-boundary snapshot rely on.
++	if ( stereoFrame != STEREO_RIGHT )
++		vk_stereo3d_both = ri.Cvar_VariableIntegerValue( "r_stereo3d" ) ? 1 : 0;
+ #endif
+ 
+ 	backEnd.color2D.u32 = ~0U;
+@@ -337,13 +344,24 @@
+ 			ri.Error( ERR_FATAL, "RE_BeginFrame: Stereo is enabled, but stereoFrame was %i", stereoFrame );
+ 		}
+ 	} else {
++#ifdef USE_VULKAN
++		// visionOS 3D stereo (patch 0007): the both-eyes path drives STEREO_LEFT/RIGHT
++		// fields without GL quad-buffer stereo. Tag the eye in cmd->buffer (1=L, 2=R)
++		// so RB_DrawBuffer can snapshot the finished left eye at the field boundary.
++		if ( stereoFrame != STEREO_CENTER && !vk_stereo3d_both ) {
++			ri.Error( ERR_FATAL, "RE_BeginFrame: Stereo is disabled, but stereoFrame was %i", stereoFrame );
++		}
++		if ( vk_stereo3d_both && stereoFrame == STEREO_LEFT )
++			cmd->buffer = 1;
++		else if ( vk_stereo3d_both && stereoFrame == STEREO_RIGHT )
++			cmd->buffer = 2;
++		else
++			cmd->buffer = 0;
++#else
+ 		if ( stereoFrame != STEREO_CENTER ) {
+ 			ri.Error( ERR_FATAL, "RE_BeginFrame: Stereo is disabled, but stereoFrame was %i", stereoFrame );
+ 		}
+ 
+-#ifdef USE_VULKAN
+-		cmd->buffer = 0;
+-#else
+ 		if ( !Q_stricmp( r_drawBuffer->string, "GL_FRONT" ) )
+ 			cmd->buffer = (int)GL_FRONT;
+ 		else
+--- a/code/renderervk/tr_backend.c
++++ b/code/renderervk/tr_backend.c
+@@ -1444,6 +1444,21 @@
+ #ifdef USE_VULKAN
+ 	vk_begin_frame();
+ 
++	// visionOS 3D stereo (patch 0007): cmd->buffer carries the eye tag from
++	// RE_BeginFrame (1=left, 2=right) on both-eyes frames. When the RIGHT field
++	// begins, the LEFT field is complete in color_image — snapshot it into its
++	// per-eye image before the right field draws over it. The copy must happen
++	// outside a render pass; end/restart the main pass around it (the same
++	// mid-frame pattern the screenmap switch uses).
++	{
++		extern void vk_stereo3d_snapshot( int idx );
++		if ( cmd->buffer == 2 ) {
++			vk_end_render_pass();
++			vk_stereo3d_snapshot( 0 );
++			vk_begin_main_render_pass();
++		}
++	}
++
+ 	tess.depthRange = DEPTH_RANGE_NORMAL;
+ 
+ 	// force depth range and viewport/scissor updates
+--- a/code/renderervk/vk.c
++++ b/code/renderervk/vk.c
+@@ -3272,6 +3272,22 @@
+ int vk_stereo3d_eye_done = 0;
+ int vk_stereo3d_frames = 0;
+ float vk_stereo3d_sep = 20.0f;   // parallax divisor; larger = gentler depth (comfort)
++
++// visionOS 3D stereo, both-eyes-per-frame (patch 0007, from the vkQuake-ios recipe).
++// Alternating eyes judders: each eye updates at half the engine rate AND the two eyes
++// are one frame apart in time. Instead the client renders BOTH stereo fields per host
++// frame (cl_scrn.c drives the native STEREO_LEFT/RIGHT path when the r_stereo3d cvar
++// is set), and each finished field is snapshotted GPU-side into its own per-eye image —
++// in-order on the render queue, so the second field can never overwrite the first
++// before the compositor samples it (the shared-image trap). vk_stereo3d_pairs counts
++// completed L+R sets; the compositor copies both eye images when it changes.
++// vk_stereo3d_wanted gates the two extra ~4K images to builds whose shell asks (visionOS).
++int vk_stereo3d_both = 0;                    // latched from r_stereo3d once per frame
++int vk_stereo3d_pairs = 0;                   // completed L+R eye sets
++int vk_stereo3d_wanted = 0;                  // shell wants eye images created (visionOS)
++static VkImage     q3s_eye_image[2];         // 0=left, 1=right
++static VkImageView q3s_eye_image_view[2];
++void vk_stereo3d_snapshot( int idx );        // defined with the shell exports below
+ 
+ 
+ static void vk_alloc_attachments( void )
+@@ -3548,6 +3564,18 @@
+ 		// post-processing/msaa-resolve
+ 		create_color_attachment( glConfig.vidWidth, glConfig.vidHeight, VK_SAMPLE_COUNT_1_BIT, vk.color_format,
+ 			usage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &vk.color_image, &vk.color_image_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, qfalse );
++
++		// visionOS 3D stereo (patch 0007): per-eye snapshots of the finished FBO frame.
++		// vk_stereo3d_snapshot() copies color_image here at each stereo field boundary;
++		// the immersive compositor samples these (as MTLTextures) while the engine
++		// renders the next frame. Created only when the shell asks (visionOS builds) —
++		// same format/extent as color_image so vkCmdCopyImage is legal.
++		if ( vk_stereo3d_wanted ) {
++			create_color_attachment( glConfig.vidWidth, glConfig.vidHeight, VK_SAMPLE_COUNT_1_BIT, vk.color_format,
++				VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &q3s_eye_image[0], &q3s_eye_image_view[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, qfalse );
++			create_color_attachment( glConfig.vidWidth, glConfig.vidHeight, VK_SAMPLE_COUNT_1_BIT, vk.color_format,
++				VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &q3s_eye_image[1], &q3s_eye_image_view[1], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, qfalse );
++		}
+ 
+ 		// screenmap-msaa
+ 		if ( vk.screenMapSamples > VK_SAMPLE_COUNT_1_BIT ) {
+@@ -4442,6 +4470,17 @@
+ 		vk.color_image_view = VK_NULL_HANDLE;
+ 	}
+ 
++	// visionOS 3D stereo (patch 0007): per-eye snapshot images ride the same
++	// attachment pool; destroy them with the rest so vid_restart recreates cleanly.
++	for ( i = 0; i < 2; i++ ) {
++		if ( q3s_eye_image[i] ) {
++			qvkDestroyImage( vk.device, q3s_eye_image[i], NULL );
++			qvkDestroyImageView( vk.device, q3s_eye_image_view[i], NULL );
++			q3s_eye_image[i] = VK_NULL_HANDLE;
++			q3s_eye_image_view[i] = VK_NULL_HANDLE;
++		}
++	}
++
+ 	if ( vk.msaa_image ) {
+ 		qvkDestroyImage( vk.device, vk.msaa_image, NULL );
+ 		qvkDestroyImageView( vk.device, vk.msaa_image_view, NULL );
+@@ -7607,9 +7646,17 @@
+ 	// Metal texture (the copy happens on the compositor's own Metal queue, avoiding the
+ 	// cross-queue hazard a Vulkan-side blit here would create). vk_stereo3d_frames counts
+ 	// minimized renders — a liveness signal (is color_image actually being updated?).
++	//
++	// Both-eyes-per-frame (patch 0007): the RIGHT field just finished in color_image
++	// (the LEFT was snapshotted at the field boundary in RB_DrawBuffer); snapshot it
++	// and publish the completed L+R pair. The legacy alternating latch remains as the
++	// fallback path (r_stereo3d 0 + shell-driven VK_Set3DEye).
+ 	if ( ri.CL_IsMinimized() ) {
+ 		vk_stereo3d_frames++;
+-		if ( vk_stereo3d_eye >= 1 && vk_stereo3d_eye <= 2 )
++		if ( vk_stereo3d_both ) {
++			vk_stereo3d_snapshot( 1 );
++			vk_stereo3d_pairs++;
++		} else if ( vk_stereo3d_eye >= 1 && vk_stereo3d_eye <= 2 )
+ 			vk_stereo3d_eye_done = vk_stereo3d_eye;
+ 	}
+ 
+@@ -7736,15 +7783,30 @@
+ //
+ // Returns an id<MTLTexture> as an opaque pointer (the ObjC shell __bridge-casts it
+ // back); NULL if the FBO is inactive. ABI note: id<MTLTexture>* is a plain pointer, so
+-// we declare the MoltenVK entry with a void* out-param and keep this file pure C.
++// we declare the MoltenVK entries with void* out-params and keep this file pure C.
++//
++// The direct externs resolve ONLY against a statically-linked MoltenVK (the iOS /
++// visionOS builds, which define Q3E_MVK_BRIDGE) — the macOS oracle links no Vulkan
++// library at all (runtime loader), so referencing these symbols there fails the link,
++// and MoltenVK 1.4's vkGetInstanceProcAddr does NOT serve the deprecated MVK API
++// (probed 2026-07-12: returns NULL), so runtime resolution is not an option. Off the
++// flag these accessors compile to NULL — no 3D bridge exists on those targets anyway.
++#ifdef Q3E_MVK_BRIDGE
+ extern void vkGetMTLTextureMVK( VkImage image, void *pMTLTexture );
++extern void vkGetMTLCommandQueueMVK( VkQueue queue, void *pMTLQueue );
++#endif
++
+ void *VK_Get3DColorMTLTexture( void )
+ {
++#ifdef Q3E_MVK_BRIDGE
+ 	void *mtlTexture = NULL;
+ 	if ( vk.color_image == VK_NULL_HANDLE )
+ 		return NULL;
+ 	vkGetMTLTextureMVK( vk.color_image, &mtlTexture );
+ 	return mtlTexture;
++#else
++	return NULL;
++#endif
+ }
+ 
+ // visionOS 3D stereo (patch 0006). The shell selects the eye for each off-screen frame
+@@ -7757,16 +7819,75 @@
+ int  VK_Get3DEyeDone( void )         { return vk_stereo3d_eye_done; }
+ int  VK_Get3DFrames( void )          { return vk_stereo3d_frames; }
+ 
++// Both-eyes-per-frame (patch 0007) shell interface. VK_Set3DWanted must be called
++// before renderer init (it gates eye-image creation in vk_create_attachments);
++// VK_Get3DEyeMTLTexture re-resolves the VkImage->MTLTexture bridge on every call so a
++// vid_restart (which recreates the images) can never hand the compositor a stale
++// pointer — the restart-poll race from the vkQuake port notes.
++void VK_Set3DWanted( int on )        { vk_stereo3d_wanted = on; }
++int  VK_Get3DPairs( void )           { return vk_stereo3d_pairs; }
++void *VK_Get3DEyeMTLTexture( int idx )
++{
++#ifdef Q3E_MVK_BRIDGE
++	void *mtlTexture = NULL;
++	if ( idx < 0 || idx > 1 || q3s_eye_image[idx] == VK_NULL_HANDLE )
++		return NULL;
++	vkGetMTLTextureMVK( q3s_eye_image[idx], &mtlTexture );
++	return mtlTexture;
++#else
++	return NULL;
++#endif
++}
++
++// GPU-side per-eye snapshot: copy the finished field out of color_image, in-order on
++// the render queue. Called OUTSIDE a render pass only — at the L/R field boundary
++// (RB_DrawBuffer, which ends/restarts the main pass around it) and after the final
++// vk_end_render_pass() in vk_end_frame. color_image rests in SHADER_READ_ONLY between
++// passes and carries TRANSFER_SRC usage (the screenshot path relies on the same).
++void vk_stereo3d_snapshot( int idx )
++{
++	VkImageCopy region;
++
++	if ( !vk_stereo3d_both || q3s_eye_image[idx] == VK_NULL_HANDLE || !ri.CL_IsMinimized() )
++		return;
++	if ( vk.color_image == VK_NULL_HANDLE )
++		return;
++
++	record_image_layout_transition( vk.cmd->command_buffer, vk.color_image, VK_IMAGE_ASPECT_COLOR_BIT,
++		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 0 );
++	record_image_layout_transition( vk.cmd->command_buffer, q3s_eye_image[idx], VK_IMAGE_ASPECT_COLOR_BIT,
++		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 0 );
++
++	Com_Memset( &region, 0, sizeof( region ) );
++	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++	region.srcSubresource.layerCount = 1;
++	region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++	region.dstSubresource.layerCount = 1;
++	region.extent.width = glConfig.vidWidth;
++	region.extent.height = glConfig.vidHeight;
++	region.extent.depth = 1;
++	qvkCmdCopyImage( vk.cmd->command_buffer, vk.color_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++		q3s_eye_image[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
++
++	record_image_layout_transition( vk.cmd->command_buffer, q3s_eye_image[idx], VK_IMAGE_ASPECT_COLOR_BIT,
++		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 0 );
++	record_image_layout_transition( vk.cmd->command_buffer, vk.color_image, VK_IMAGE_ASPECT_COLOR_BIT,
++		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 0 );
++}
++
+ // The engine's MoltenVK MTLCommandQueue. The immersive compositor renders on THIS same
+ // queue so its copy/sample of color_image serializes with the engine's frame renders —
+ // Metal hazard-tracks the shared texture, avoiding the cross-queue hang a separate queue
+ // caused. id<MTLCommandQueue>* is a plain pointer, so declare it void* to stay pure C.
+-extern void vkGetMTLCommandQueueMVK( VkQueue queue, void *pMTLQueue );
+ void *VK_GetMTLCommandQueue( void )
+ {
++#ifdef Q3E_MVK_BRIDGE
+ 	void *mtlQueue = NULL;
+ 	vkGetMTLCommandQueueMVK( vk.queue, &mtlQueue );
+ 	return mtlQueue;
++#else
++	return NULL;
++#endif
+ }
+ 
+ 
