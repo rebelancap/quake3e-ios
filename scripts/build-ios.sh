@@ -84,17 +84,22 @@ count=$(ls "$OBJDIR"/*.o | wc -l | tr -d ' ')
 libtool -static -o "$LIBOUT" "$OBJDIR"/*.o
 echo "== libq3e.a: $(du -h "$LIBOUT" | cut -f1) ($count objects)"
 
-# app icon: legacy CFBundleIconFiles PNGs (Xcode 26 actool rejects classic
-# single-size asset catalogs — q2repro-ios verified fact). Sizes generated
-# from the 1024px master at build time.
+# app icon: MULTI-size AppIcon.appiconset compiled to Assets.car by actool.
+# Loose PNGs + CFBundleIconFiles render on the Home Screen but leave a BLANK
+# tile in SideStore/AltStore "My Apps" — those resolve the installed icon via
+# CFBundleIconName -> Assets.car, which loose PNGs don't provide. A single-size
+# catalog is rejected by Xcode 26 actool; a multi-size one compiles cleanly
+# (verified). Sizes regenerated from the 1024px master at build time so a clean
+# checkout is self-contained.
 ICON_SRC="$SPIKE/icon/q3_icon_big.png"
-ICON_GEN="$SPIKE/icon/generated"
+ICONSET="$SPIKE/Assets.xcassets/AppIcon.appiconset"
 [ -f "$ICON_SRC" ] || { echo "FATAL: icon master missing at $ICON_SRC"; exit 1; }
-mkdir -p "$ICON_GEN"
-sips -z 120 120 "$ICON_SRC" --out "$ICON_GEN/AppIcon60x60@2x.png" > /dev/null
-sips -z 180 180 "$ICON_SRC" --out "$ICON_GEN/AppIcon60x60@3x.png" > /dev/null
-sips -z 152 152 "$ICON_SRC" --out "$ICON_GEN/AppIcon76x76@2x~ipad.png" > /dev/null
-sips -z 167 167 "$ICON_SRC" --out "$ICON_GEN/AppIcon83.5x83.5@2x~ipad.png" > /dev/null
+[ -f "$ICONSET/Contents.json" ] || { echo "FATAL: appiconset Contents.json missing at $ICONSET"; exit 1; }
+sips -z 120 120   "$ICON_SRC" --out "$ICONSET/AppIcon60x60@2x.png"     > /dev/null
+sips -z 180 180   "$ICON_SRC" --out "$ICONSET/AppIcon60x60@3x.png"     > /dev/null
+sips -z 152 152   "$ICON_SRC" --out "$ICONSET/AppIcon76x76@2x.png"     > /dev/null
+sips -z 167 167   "$ICON_SRC" --out "$ICONSET/AppIcon83.5x83.5@2x.png" > /dev/null
+sips -z 1024 1024 "$ICON_SRC" --out "$ICONSET/AppIcon1024.png"         > /dev/null
 
 (cd "$SPIKE" && xcodegen generate --quiet)
 
