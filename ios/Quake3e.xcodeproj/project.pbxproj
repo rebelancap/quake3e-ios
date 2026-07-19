@@ -18,6 +18,7 @@
 		1A1B861A4D5B98583A0BEA2B /* GameController.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E54F9A25DC37C6780486BC76 /* GameController.framework */; };
 		1EE7471BB794DF2CF1EBDE05 /* Q3EImmersive.m in Sources */ = {isa = PBXBuildFile; fileRef = F19A3D9E8C56D2A21796B565 /* Q3EImmersive.m */; };
 		22936B92BD2143F15F69BDD7 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9F147F24E9462C77D359242F /* Security.framework */; };
+		291384D045C153E2CA0B0B9B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DC9C85CCB2D7E73FBDF9A8F5 /* Assets.xcassets */; };
 		29603872B366A1CDE089C17A /* ios_settings.m in Sources */ = {isa = PBXBuildFile; fileRef = 66978FAE2B803D616BE6176F /* ios_settings.m */; };
 		297FAFDB2059827D2A1D033F /* GameController.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E54F9A25DC37C6780486BC76 /* GameController.framework */; };
 		3B61A3E8638070FB91F6E292 /* Q3EVisionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67CF1E724A295E5D5A7E8C41 /* Q3EVisionApp.swift */; };
@@ -33,7 +34,6 @@
 		5C4877EB156210EB0C2FF86A /* ios_metal.m in Sources */ = {isa = PBXBuildFile; fileRef = E49EC9B3284D1B2BC896644E /* ios_metal.m */; };
 		61297CAD9D85A0D91D5EE098 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5612936E65EAA6B94B487548 /* Foundation.framework */; };
 		65A629987B0F5D8630F2839B /* CoreVideo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CDB03F055C45BB54AD8A402B /* CoreVideo.framework */; };
-		6D412191B000A572B1B606F3 /* AppIcon60x60@3x.png in Resources */ = {isa = PBXBuildFile; fileRef = 7592252136593B605FD07C2B /* AppIcon60x60@3x.png */; };
 		715D1C24AEB0F5EFAAE1671C /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 36CC490E0E38BA5D925C297D /* CoreGraphics.framework */; };
 		72A00A9E2FD00D724D0F67ED /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9EF71329A1C7CC7EDC8C611B /* AudioToolbox.framework */; };
 		741FA5F59D121B93F2D2392F /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CC068F6D19C4D3A25A2F1769 /* QuartzCore.framework */; };
@@ -44,14 +44,12 @@
 		8FD1D5F9D892BFE13356B979 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5612936E65EAA6B94B487548 /* Foundation.framework */; };
 		A97BDE7175999A5496A08649 /* ios_console.m in Sources */ = {isa = PBXBuildFile; fileRef = 2AC36C1F39314DF1FE314BE7 /* ios_console.m */; };
 		AC1D3F3BE6B90C19682C7352 /* ios_settings.m in Sources */ = {isa = PBXBuildFile; fileRef = 66978FAE2B803D616BE6176F /* ios_settings.m */; };
-		AE5BF110269C50DDE48E973C /* AppIcon76x76@2x~ipad.png in Resources */ = {isa = PBXBuildFile; fileRef = FC3214420E3AF75E1A4A7099 /* AppIcon76x76@2x~ipad.png */; };
 		AFD85AD72972E99E7C2D1DEA /* Q3EBlackBox.m in Sources */ = {isa = PBXBuildFile; fileRef = 6E5EFFD7864F142C8CA4394D /* Q3EBlackBox.m */; };
 		BEF9BEE79FB9A84EFD713454 /* AppShell.m in Sources */ = {isa = PBXBuildFile; fileRef = D9CE7C66352300892A1B6B0D /* AppShell.m */; };
 		BF34D10CEA356B21F2CF3EDB /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F8291DC06CA7B3C93F2C8EF3 /* SystemConfiguration.framework */; };
 		C3265238E7FFE3FF3FD0DF29 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F8291DC06CA7B3C93F2C8EF3 /* SystemConfiguration.framework */; };
 		CC2360F670973D2F94B4B7EC /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AB8F52D7E98B32EC7FA91D30 /* Metal.framework */; };
 		D0CBD2C70FED9C8D8ACAEB6E /* CoreMotion.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8D1F0066AA4E688EA48C2FC3 /* CoreMotion.framework */; };
-		D7A80E3EA6A7312E0BCC9605 /* AppIcon83.5x83.5@2x~ipad.png in Resources */ = {isa = PBXBuildFile; fileRef = 9EA0010706731BA6F9DE2F13 /* AppIcon83.5x83.5@2x~ipad.png */; };
 		D89976254862A86FF580079F /* ios_input.m in Sources */ = {isa = PBXBuildFile; fileRef = 64B9DA38E4711DA3D1DAD406 /* ios_input.m */; };
 		D94404F62A6C44F21EF8199E /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6D5BA427322AB0E1A8E703A0 /* AVFoundation.framework */; };
 		D9C7FD5CE38D07AF1F7D5FCA /* MoltenVK.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0AF1B1EB09A3FC44B64B1BFE /* MoltenVK.xcframework */; };
@@ -59,7 +57,6 @@
 		E0F62A08D03480A9D4564313 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 36CC490E0E38BA5D925C297D /* CoreGraphics.framework */; };
 		E20C42DBA2FE049C12DA3A7A /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CFC2926895277A390FCB97B1 /* SwiftUI.framework */; };
 		E5568D9988CF9852B7A5F5C9 /* AppShell_vision.m in Sources */ = {isa = PBXBuildFile; fileRef = 85E7776CF90E063322860D7B /* AppShell_vision.m */; };
-		F14540DA86050BC6BC9057E3 /* AppIcon60x60@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = C114C3AD0526E83E3EB1714B /* AppIcon60x60@2x.png */; };
 		F528A6701C9D048A982F5BEA /* IOSurface.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A28E7D2CE746F930C9DFFDE9 /* IOSurface.framework */; };
 		F5A8D69144D801CC3C3DF4C2 /* ARKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B37EAC3671887DAF3EDA3E61 /* ARKit.framework */; };
 		F821306993D95659E95D50C3 /* ios_glue.c in Sources */ = {isa = PBXBuildFile; fileRef = 7D7173C31A62848743DF3F01 /* ios_glue.c */; };
@@ -84,17 +81,14 @@
 		6D5BA427322AB0E1A8E703A0 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
 		6E5EFFD7864F142C8CA4394D /* Q3EBlackBox.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Q3EBlackBox.m; sourceTree = "<group>"; };
 		6FA43AC1FB6966A5F89DA82F /* ios_snd.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ios_snd.c; sourceTree = "<group>"; };
-		7592252136593B605FD07C2B /* AppIcon60x60@3x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "AppIcon60x60@3x.png"; sourceTree = "<group>"; };
 		7D7173C31A62848743DF3F01 /* ios_glue.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ios_glue.c; sourceTree = "<group>"; };
 		85E7776CF90E063322860D7B /* AppShell_vision.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AppShell_vision.m; sourceTree = "<group>"; };
 		8D1F0066AA4E688EA48C2FC3 /* CoreMotion.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMotion.framework; path = System/Library/Frameworks/CoreMotion.framework; sourceTree = SDKROOT; };
-		9EA0010706731BA6F9DE2F13 /* AppIcon83.5x83.5@2x~ipad.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "AppIcon83.5x83.5@2x~ipad.png"; sourceTree = "<group>"; };
 		9EF71329A1C7CC7EDC8C611B /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
 		9F147F24E9462C77D359242F /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		A28E7D2CE746F930C9DFFDE9 /* IOSurface.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOSurface.framework; path = System/Library/Frameworks/IOSurface.framework; sourceTree = SDKROOT; };
 		AB8F52D7E98B32EC7FA91D30 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		B37EAC3671887DAF3EDA3E61 /* ARKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ARKit.framework; path = System/Library/Frameworks/ARKit.framework; sourceTree = SDKROOT; };
-		C114C3AD0526E83E3EB1714B /* AppIcon60x60@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "AppIcon60x60@2x.png"; sourceTree = "<group>"; };
 		C5D108124494B7628C9E0274 /* AppShell_vision.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AppShell_vision.h; sourceTree = "<group>"; };
 		CC068F6D19C4D3A25A2F1769 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
 		CDB03F055C45BB54AD8A402B /* CoreVideo.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreVideo.framework; path = System/Library/Frameworks/CoreVideo.framework; sourceTree = SDKROOT; };
@@ -104,6 +98,7 @@
 		D9374DF16DD2EDCE039B7896 /* Q3EImmersive.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Q3EImmersive.h; sourceTree = "<group>"; };
 		D9CE7C66352300892A1B6B0D /* AppShell.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AppShell.m; sourceTree = "<group>"; };
 		D9F737A370AC9EC1DA18DABF /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		DC9C85CCB2D7E73FBDF9A8F5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DF213318E4DAFCD0E633FEA8 /* Quake3e.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Quake3e.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DF4F3136705C2198860DC481 /* Assets-visionos.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Assets-visionos.xcassets"; sourceTree = "<group>"; };
 		E45895A54BB1884716BCCD15 /* Quake3e-visionOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Quake3e-visionOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -112,7 +107,6 @@
 		F0B388950920F898909CA77E /* CompositorServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CompositorServices.framework; path = System/Library/Frameworks/CompositorServices.framework; sourceTree = SDKROOT; };
 		F19A3D9E8C56D2A21796B565 /* Q3EImmersive.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Q3EImmersive.m; sourceTree = "<group>"; };
 		F8291DC06CA7B3C93F2C8EF3 /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
-		FC3214420E3AF75E1A4A7099 /* AppIcon76x76@2x~ipad.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "AppIcon76x76@2x~ipad.png"; sourceTree = "<group>"; };
 		FE2CE82C0D6AA45FF5D9E516 /* ios_shortcuts.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ios_shortcuts.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -178,24 +172,12 @@
 			isa = PBXGroup;
 			children = (
 				DF4F3136705C2198860DC481 /* Assets-visionos.xcassets */,
-				225AD4F36A238C244C31CB3D /* generated */,
+				DC9C85CCB2D7E73FBDF9A8F5 /* Assets.xcassets */,
 				3FEE4DFEF26A112F6568DD4A /* shell */,
 				669E3B443EB36602A7C7056F /* shell-visionos */,
 				26E5B9ED6D40B9E9A12E7143 /* Frameworks */,
 				1286989607DD7197C8FE66A2 /* Products */,
 			);
-			sourceTree = "<group>";
-		};
-		225AD4F36A238C244C31CB3D /* generated */ = {
-			isa = PBXGroup;
-			children = (
-				C114C3AD0526E83E3EB1714B /* AppIcon60x60@2x.png */,
-				7592252136593B605FD07C2B /* AppIcon60x60@3x.png */,
-				FC3214420E3AF75E1A4A7099 /* AppIcon76x76@2x~ipad.png */,
-				9EA0010706731BA6F9DE2F13 /* AppIcon83.5x83.5@2x~ipad.png */,
-			);
-			name = generated;
-			path = icon/generated;
 			sourceTree = "<group>";
 		};
 		26E5B9ED6D40B9E9A12E7143 /* Frameworks */ = {
@@ -343,10 +325,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				F14540DA86050BC6BC9057E3 /* AppIcon60x60@2x.png in Resources */,
-				6D412191B000A572B1B606F3 /* AppIcon60x60@3x.png in Resources */,
-				AE5BF110269C50DDE48E973C /* AppIcon76x76@2x~ipad.png in Resources */,
-				D7A80E3EA6A7312E0BCC9605 /* AppIcon83.5x83.5@2x~ipad.png in Resources */,
+				291384D045C153E2CA0B0B9B /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

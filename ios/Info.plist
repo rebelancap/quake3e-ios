@@ -35,7 +35,7 @@
 		<true/>
 	</dict>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>1.0.1</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>UILaunchScreen</key>
@@ -48,6 +48,8 @@
 			<array>
 				<string>AppIcon60x60</string>
 			</array>
+			<key>CFBundleIconName</key>
+			<string>AppIcon</string>
 		</dict>
 	</dict>
 	<key>CFBundleIcons~ipad</key>
@@ -60,6 +62,8 @@
 				<string>AppIcon76x76</string>
 				<string>AppIcon83.5x83.5</string>
 			</array>
+			<key>CFBundleIconName</key>
+			<string>AppIcon</string>
 		</dict>
 	</dict>
 	<key>UIApplicationSceneManifest</key>
