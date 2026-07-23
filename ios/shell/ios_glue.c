@@ -353,7 +353,12 @@ void VKimp_Init(glconfig_t *config) {
 	config->stencilBits = 8;
 	config->displayFrequency = Q3E_DisplayMaxFPS();
 	config->isFullscreen = qtrue;
-	config->deviceSupportsGamma = qfalse;
+	// Report gamma as supported even though iOS has no hardware ramps: with the
+	// FBO active the renderer applies r_gamma in the post-blit shader (rebuilt
+	// live on change via CVG_RENDERER), and the stock SETUP menu GRAYS OUT its
+	// Brightness slider when glconfig says unsupported — leaving users no
+	// in-game brightness control. GLimp_SetGamma below stays a no-op.
+	config->deviceSupportsGamma = qtrue;
 	config->driverType = GLDRV_ICD;
 	config->hardwareType = GLHW_GENERIC;
 	config->stereoEnabled = qfalse;
@@ -380,7 +385,7 @@ qboolean VK_CreateSurface(VkInstance instance, VkSurfaceKHR *pSurface) {
 // ---- gamma (no hardware ramps on iOS; r_fbo shader gamma instead) ----
 
 void GLimp_InitGamma(glconfig_t *config) {
-	config->deviceSupportsGamma = qfalse;
+	config->deviceSupportsGamma = qtrue;   // see VKimp_Init: shader gamma is live
 }
 
 void GLimp_SetGamma(unsigned char red[256], unsigned char green[256], unsigned char blue[256]) {

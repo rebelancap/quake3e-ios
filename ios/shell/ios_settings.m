@@ -24,6 +24,7 @@ void  Q3E_Set3DHeight(float h);              // 3D screen height + auto-tilt
 void  Q3E_Set3DHideGun(int on);              // hide the weapon in 3D (AppShell_vision.m)
 void  Q3E_Set3DHideHead(int on);             // flatten the HUD 3D head in 3D
 void  Q3E_Set3DDim(float d);                 // surroundings dimming (Q3EImmersive.m)
+void  Q3E_Set3DBrightness(float gamma);      // 3D panel brightness (Q3EImmersive.m shader)
 #endif
 
 #define DEF_GYRO_ON     @"q3e_gyro_on"
@@ -74,6 +75,18 @@ void  Q3E_Set3DDim(float d);                 // surroundings dimming (Q3EImmersi
 // normalized by (focus/64) so changing focus does NOT change perceived depth strength.
 #define Q3E_FOCUS_DEFAULT 160.0f
 #define Q3E_DIM_DEFAULT   0.8f
+// Default brightness 1.2 (Austin, on-device): stock 1.0 reads dark on the
+// headset panel and on phones. Deliberately NOT part of reset3DDefaults —
+// that button restores only the 3D-section placement/depth values.
+#define Q3E_BRIGHT_DEFAULT 1.2f
+
+// Look-sensitivity display rescale (Austin, on-pad): sliders show a clean
+// 0.5–10; the applied gain is displayed x 1.2, so the ceiling equals the old
+// 12 he wanted headroom for and the default displayed 5.0 = actual 6.0 (his
+// on-device pick, ~1.7x the old pad baseline). Stored values are in DISPLAYED
+// units. The touch and pad paths both scale from the same sliders.
+#define Q3E_SENS_DEFAULT 5.0f
+#define Q3E_SENS_APPLY   1.2f
 
 static float def_float(NSString *key, float fallback) {
     NSNumber *v = [NSUserDefaults.standardUserDefaults objectForKey:key];
@@ -88,9 +101,11 @@ static void apply_cvar_f(const char *name, float v) {
 // live layers.
 void Q3E_Settings_ApplyAll(void) {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
-    float legacy = def_float(DEF_TOUCH_SENS, 3.5f);
+    // Legacy single-axis values were stored in applied units; convert to displayed.
+    float legacy = def_float(DEF_TOUCH_SENS, Q3E_SENS_DEFAULT * Q3E_SENS_APPLY) / Q3E_SENS_APPLY;
     Q3E_Input_SetGyro([d boolForKey:DEF_GYRO_ON], def_float(DEF_GYRO_SCALE, 2.0f));
-    Q3E_Input_SetTouchSens(def_float(DEF_SENS_X, legacy), def_float(DEF_SENS_Y, legacy));
+    Q3E_Input_SetTouchSens(def_float(DEF_SENS_X, legacy) * Q3E_SENS_APPLY,
+                           def_float(DEF_SENS_Y, legacy) * Q3E_SENS_APPLY);
     Q3E_Input_SetControlStyle(def_float(DEF_CTL_SCALE, 1.0f),
                               def_float(DEF_CTL_ALPHA, 1.0f),
                               [d boolForKey:DEF_LEFTY]);
@@ -100,7 +115,7 @@ void Q3E_Settings_ApplyAll(void) {
     // Engine cvars (aim / display / gameplay).
     apply_cvar_f("m_pitch", [d boolForKey:DEF_INVERT] ? -0.022f : 0.022f);
     apply_cvar_f("cg_fov", def_float(DEF_FOV, 90.0f));
-    apply_cvar_f("r_gamma", def_float(DEF_BRIGHTNESS, 1.0f));
+    apply_cvar_f("r_gamma", def_float(DEF_BRIGHTNESS, Q3E_BRIGHT_DEFAULT));
     // cl_run 1 = always run; when off, default to walk (touch/pad have no +speed).
     apply_cvar_f("cl_run", [d objectForKey:DEF_ALWAYS_RUN] ? ([d boolForKey:DEF_ALWAYS_RUN] ? 1 : 0) : 1);
     apply_cvar_f("cg_autoswitch", [d objectForKey:DEF_AUTOSWITCH] ? ([d boolForKey:DEF_AUTOSWITCH] ? 1 : 0) : 1);
@@ -131,6 +146,11 @@ void Q3E_Settings_ApplyAll(void) {
     Q3E_Set3DHideGun([d objectForKey:DEF_HIDEGUN_3D] ? [d boolForKey:DEF_HIDEGUN_3D] : 0);
     Q3E_Set3DHideHead([d objectForKey:DEF_HIDEHEAD_3D] ? [d boolForKey:DEF_HIDEHEAD_3D] : 1);
     Q3E_Set3DDim(def_float(DEF_DIM_3D, Q3E_DIM_DEFAULT));
+    // 3D panel brightness: r_gamma's FBO gamma pass runs in the swapchain blit,
+    // which never executes while the engine is minimized into the panel — so the
+    // Brightness slider ALSO drives an equivalent pow() in the panel shader.
+    // Exactly one of the two paths is ever active (2D window vs 3D panel).
+    Q3E_Set3DBrightness(def_float(DEF_BRIGHTNESS, Q3E_BRIGHT_DEFAULT));
 #endif
 }
 
@@ -169,13 +189,13 @@ void Q3E_Settings_ApplyAll(void) {
     done.titleLabel.font = [UIFont boldSystemFontOfSize:17];
     [done addTarget:self action:@selector(dismissSelf) forControlEvents:UIControlEventTouchUpInside];
 
-    float legacy = def_float(DEF_TOUCH_SENS, 3.5f);
+    float legacy = def_float(DEF_TOUCH_SENS, Q3E_SENS_DEFAULT * Q3E_SENS_APPLY) / Q3E_SENS_APPLY;
     _gyroSwitch = [self makeSwitch:[d boolForKey:DEF_GYRO_ON]];
     _gyroSlider = [self makeSlider:0.5 max:6.0 value:def_float(DEF_GYRO_SCALE, 2.0f)];
     _gyroValue = [self label:@"" size:14 bold:NO];
-    _sensXSlider = [self makeSlider:0.5 max:8.0 value:def_float(DEF_SENS_X, legacy)];
+    _sensXSlider = [self makeSlider:0.5 max:10.0 value:def_float(DEF_SENS_X, legacy)];
     _sensXValue = [self label:@"" size:14 bold:NO];
-    _sensYSlider = [self makeSlider:0.5 max:8.0 value:def_float(DEF_SENS_Y, legacy)];
+    _sensYSlider = [self makeSlider:0.5 max:10.0 value:def_float(DEF_SENS_Y, legacy)];
     _sensYValue = [self label:@"" size:14 bold:NO];
     _sizeSlider = [self makeSlider:0.7 max:1.5 value:def_float(DEF_CTL_SCALE, 1.0f)];
     _sizeValue = [self label:@"" size:14 bold:NO];
@@ -183,11 +203,14 @@ void Q3E_Settings_ApplyAll(void) {
     _alphaValue = [self label:@"" size:14 bold:NO];
     _leftySwitch = [self makeSwitch:[d boolForKey:DEF_LEFTY]];
 #if TARGET_OS_VISION
-    NSInteger maxHz = 90; // UIScreen unavailable on visionOS; compositor cadence
+    // No number: UIScreen (and the panel's max rate) isn't queryable on visionOS,
+    // and hardcoding one misled — M5 Vision Pro runs 120 Hz, earlier panels 90.
+    // "Native" = whatever the OS grants the display link (shell requests up to 120).
+    NSString *nativeLabel = @"Native";
 #else
-    NSInteger maxHz = UIScreen.mainScreen.maximumFramesPerSecond;
+    NSString *nativeLabel = [NSString stringWithFormat:@"Native (%ld Hz)",
+                             (long)UIScreen.mainScreen.maximumFramesPerSecond];
 #endif
-    NSString *nativeLabel = [NSString stringWithFormat:@"Native (%ld Hz)", (long)maxHz];
     _refreshSeg = [[UISegmentedControl alloc] initWithItems:@[@"60 Hz", nativeLabel]];
     _refreshSeg.selectedSegmentIndex = [d boolForKey:DEF_REFRESH_60] ? 0 : 1;
     [_refreshSeg addTarget:self action:@selector(changed) forControlEvents:UIControlEventValueChanged];
@@ -196,7 +219,7 @@ void Q3E_Settings_ApplyAll(void) {
     _invertSwitch = [self makeSwitch:[d boolForKey:DEF_INVERT]];
     _fovSlider = [self makeSlider:60 max:130 value:def_float(DEF_FOV, 90.0f)];
     _fovValue = [self label:@"" size:14 bold:NO];
-    _brightSlider = [self makeSlider:0.5 max:3.0 value:def_float(DEF_BRIGHTNESS, 1.0f)];
+    _brightSlider = [self makeSlider:0.5 max:3.0 value:def_float(DEF_BRIGHTNESS, Q3E_BRIGHT_DEFAULT)];
     _brightValue = [self label:@"" size:14 bold:NO];
     _alwaysRunSwitch = [self makeSwitch:([d objectForKey:DEF_ALWAYS_RUN] ? [d boolForKey:DEF_ALWAYS_RUN] : YES)];
     _autoSwitchSwitch = [self makeSwitch:([d objectForKey:DEF_AUTOSWITCH] ? [d boolForKey:DEF_AUTOSWITCH] : YES)];
@@ -226,7 +249,8 @@ void Q3E_Settings_ApplyAll(void) {
     _dimSlider = [self makeSlider:0.0 max:1.0 value:def_float(DEF_DIM_3D, Q3E_DIM_DEFAULT)];
     _dimValue = [self label:@"" size:14 bold:NO];
     _unitsSeg = [[UISegmentedControl alloc] initWithItems:@[@"m", @"ft"]];
-    _unitsSeg.selectedSegmentIndex = [d boolForKey:DEF_UNITS_FT] ? 1 : 0;
+    // Feet by default (Austin); metric persists once the user picks it.
+    _unitsSeg.selectedSegmentIndex = ([d objectForKey:DEF_UNITS_FT] ? [d boolForKey:DEF_UNITS_FT] : YES) ? 1 : 0;
     [_unitsSeg addTarget:self action:@selector(changed) forControlEvents:UIControlEventValueChanged];
     _distSlider = [self makeSlider:1.5 max:6.0 value:def_float(DEF_DIST_3D, 3.6f)];
     _distValue = [self label:@"" size:14 bold:NO];
@@ -241,8 +265,10 @@ void Q3E_Settings_ApplyAll(void) {
     rows.spacing = 14;
     rows.translatesAutoresizingMaskIntoConstraints = NO;
 
+    // The title + Done row is PINNED above the scroll view (not scroll content),
+    // so Done stays reachable however far down the sheet is scrolled.
     UIStackView *header = [self row:@[title, done]];
-    [rows addArrangedSubview:header];
+    header.translatesAutoresizingMaskIntoConstraints = NO;
 
 #if TARGET_OS_VISION
     UIButton *reset3D = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -295,10 +321,14 @@ void Q3E_Settings_ApplyAll(void) {
 
     UIScrollView *scroll = [[UIScrollView alloc] init];
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:header];
     [self.view addSubview:scroll];
     [scroll addSubview:rows];
     [NSLayoutConstraint activateConstraints:@[
-        [scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [header.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:14],
+        [header.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:24],
+        [header.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-24],
+        [scroll.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:6],
         [scroll.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor],
         [scroll.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor],
         [scroll.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor],

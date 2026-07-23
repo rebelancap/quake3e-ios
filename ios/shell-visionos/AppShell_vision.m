@@ -231,12 +231,14 @@ static UILabel *q3e_fpsLabel;
 static NSTimer *q3e_fpsTimer;
 static int q3e_frameCount;
 
-// visionOS composits at ~90 Hz; the settings "60/native" toggle maps to the
-// display-link range exactly as on iOS (native = up to 90 here).
+// The settings "60/native" toggle maps to the display-link range exactly as on
+// iOS. Native REQUESTS up to 120: the M5 Vision Pro compositor runs 120 Hz;
+// earlier panels grant 90 — the OS clamps the range to what the display does,
+// so asking high never harms (the old hardcoded 90 handicapped the M5).
 void Q3E_Shell_SetRefreshMode(int mode60) {
     if (!q3e_link) return;
     if (mode60) q3e_link.preferredFrameRateRange = CAFrameRateRangeMake(60, 60, 60);
-    else        q3e_link.preferredFrameRateRange = CAFrameRateRangeMake(60, 90, 90);
+    else        q3e_link.preferredFrameRateRange = CAFrameRateRangeMake(60, 120, 120);
 }
 
 // Engine frame rate, published for the immersive compositor's own FPS overlay (the
@@ -432,7 +434,7 @@ void Q3E_Shell_SetFPSCounter(int enabled) {
     });
 
     self.link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
-    self.link.preferredFrameRateRange = CAFrameRateRangeMake(60, 90, 90);
+    self.link.preferredFrameRateRange = CAFrameRateRangeMake(60, 120, 120);  // M5 AVP = 120 Hz; OS clamps on 90 Hz panels
     [self.link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     q3e_link = self.link;
     NSLog(@"Q3E-VISION display link started");

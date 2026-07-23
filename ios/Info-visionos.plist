@@ -17,9 +17,15 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.1</string>
+	<string>1.0.2</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<!-- Names the compiled icon in Assets.car. Without this, SideStore/AltStore's
+	     installed-apps ("My Apps") list shows a blank tile — the same failure the
+	     iOS target fixed in 1.0.1 (PUBLISH-GUIDE §8); Sources-tab icons come from
+	     the source JSON and mask the problem. -->
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.games</string>
 	<key>CFBundleURLTypes</key>
