@@ -1,0 +1,31 @@
+--- a/code/renderervk/tr_backend.c
++++ b/code/renderervk/tr_backend.c
+@@ -718,7 +718,27 @@
+ #ifdef USE_VULKAN
+ 			Com_Memcpy( vk_world.modelview_transform, backEnd.or.modelMatrix, 64 );
+ 			tess.depthRange = depthRange ? DEPTH_RANGE_WEAPON : DEPTH_RANGE_NORMAL;
+-			vk_update_mvp( NULL );
++			// visionOS 3D stereo (patch 0008): port of the GL-path weapon-stereo fix
++			// below (#ifndef USE_VULKAN) — in stereo the first-person weapon must be
++			// projected with the convergence plane at r_znear or it "comes out of
++			// the screen": at the scene's r_zproj (default 160) a ~6-unit-away
++			// weapon gets ~26x crossed disparity, unfusable in a headset (verified
++			// on-device: the weapon sat uncomfortably close; a screen-space shift
++			// could not fix it, only re-projection can). Recomputing with zProj =
++			// r_znear parks the weapon at the screen plane — the FOV terms are
++			// zProj-invariant, so only the stereo geometry changes. Crosshair
++			// entities keep the scene projection, as upstream.
++			if ( depthRange && !isCrosshair && backEnd.viewParms.stereoFrame != STEREO_CENTER ) {
++				viewParms_t temp = backEnd.viewParms;
++				float savedProj[16];
++				R_SetupProjection( &temp, r_znear->value, qfalse );
++				Com_Memcpy( savedProj, backEnd.viewParms.projectionMatrix, 64 );
++				Com_Memcpy( backEnd.viewParms.projectionMatrix, temp.projectionMatrix, 64 );
++				vk_update_mvp( NULL );
++				Com_Memcpy( backEnd.viewParms.projectionMatrix, savedProj, 64 );
++			} else {
++				vk_update_mvp( NULL );
++			}
+ #else
+ 			qglLoadMatrixf( backEnd.or.modelMatrix );
+ #endif

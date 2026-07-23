@@ -262,8 +262,14 @@ static void pad_poll(int menuMode, float dt) {
         const float look_dt = dt * 120.0f;
         float cx = 0.25f * fabsf(rx) + 0.75f * rx * rx;
         float cy = 0.25f * fabsf(ry) + 0.75f * ry * ry;
-        pad_lookx += copysignf(cx, rx) * PAD_LOOK_SPEED * look_dt;
-        pad_looky += -copysignf(cy, ry) * PAD_LOOK_SPEED * look_dt;
+        // The settings Look-sensitivity sliders scale pad look too (they were
+        // touch-only — the pad silently ignored them). Slider 3.5 (the default)
+        // = the tuned PAD_LOOK_SPEED baseline, so the 0.5–8 range spans
+        // ~0.14x–2.3x of the original gain, per axis.
+        const float pad_sx = look_sens_x * (1.0f / 3.5f);
+        const float pad_sy = look_sens_y * (1.0f / 3.5f);
+        pad_lookx += copysignf(cx, rx) * PAD_LOOK_SPEED * pad_sx * look_dt;
+        pad_looky += -copysignf(cy, ry) * PAD_LOOK_SPEED * pad_sy * look_dt;
         int dx = (int)pad_lookx, dy = (int)pad_looky;
         if (dx || dy) {
             pad_lookx -= dx; pad_looky -= dy;

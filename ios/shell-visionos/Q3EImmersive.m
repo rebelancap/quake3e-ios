@@ -78,6 +78,16 @@ void Q3E_Set3DDim(float d) {
     q3e_dimLevel = d;
 }
 
+// Panel brightness = the engine's r_gamma, applied HERE for 3D: the renderer's own
+// gamma pass lives in the FBO->swapchain blit, which never runs while the engine is
+// minimized into the panel — so the settings Brightness slider drives this shader
+// pow() instead (same curve, out^(1/gamma) on display-encoded values). Exactly one
+// of the two paths is active at a time: swapchain blit in 2D, panel shader in 3D.
+static volatile float q3e_panelGamma = 1.0f;
+void Q3E_Set3DBrightness(float gamma) {
+    if (gamma >= 0.5f && gamma <= 3.0f) q3e_panelGamma = gamma;
+}
+
 // Build a vertical, head-facing screen transform 2 m along the head's horizontal gaze
 // at the head's height. originFromDevice = the head pose in world space (device -Z is
 // forward, +Z points back toward the user).
@@ -177,6 +187,21 @@ static NSString *const kQ3EQuadShader =
  "  if (srgbDecode > 0.5) c.rgb = pow(c.rgb, 2.2);\n"
  "  return c;\n"
  "}\n"
+ // Panel variant: FORCE alpha 1. The engine FBO's alpha channel is blend-op
+ // residue (mark decals, blob shadows, multi-stage surfaces leave a<1), and in
+ // mixed immersion the compositor reads drawable alpha as passthrough — copying
+ // it through ghosted the real room THROUGH doors/decals/shadows (Q-012 finding:
+ // sunlit curtains visible through a white door). The panel is an opaque screen.
+ // params = (srgbDecode, 1/r_gamma): brightness applies on the display-encoded
+ // values BEFORE linearization, matching the engine's own gamma-pass order.
+ "fragment float4 q3e_fs_panel(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]],\n"
+ "                             constant float2& params [[buffer(0)]]) {\n"
+ "  constexpr sampler s(filter::linear, mip_filter::linear, max_anisotropy(16));\n"
+ "  float4 c = tex.sample(s, in.uv);\n"
+ "  if (params.y != 1.0) c.rgb = pow(c.rgb, params.y);\n"
+ "  if (params.x > 0.5) c.rgb = pow(c.rgb, 2.2);\n"
+ "  return float4(c.rgb, 1.0);\n"
+ "}\n"
  "fragment float4 q3e_fill_fs(VOut in [[stage_in]], constant float4& c [[buffer(0)]]) {\n"
  "  return c;\n"
  "}\n";
@@ -188,13 +213,14 @@ static void q3e_build_pipeline(id<MTLDevice> dev, MTLPixelFormat colorFmt, MTLPi
                              err.localizedDescription.UTF8String ?: "?"); return; }
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
     pd.vertexFunction   = [lib newFunctionWithName:@"q3e_vs"];
-    pd.fragmentFunction = [lib newFunctionWithName:@"q3e_fs"];
+    pd.fragmentFunction = [lib newFunctionWithName:@"q3e_fs_panel"];   // opaque: alpha forced to 1
     pd.colorAttachments[0].pixelFormat = colorFmt;
     pd.depthAttachmentPixelFormat = depthFmt;   // render pass has depth; must match
     q3e_pipeline = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
     if (!q3e_pipeline) { Q3E_BlackBox("imm: pipeline FAILED: %s",
                                       err.localizedDescription.UTF8String ?: "?"); return; }
-    // FPS overlay: same shaders, alpha blending on (CG text is premultiplied).
+    // FPS overlay: real-alpha shader, alpha blending on (CG text is premultiplied).
+    pd.fragmentFunction = [lib newFunctionWithName:@"q3e_fs"];
     pd.colorAttachments[0].blendingEnabled = YES;
     pd.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
     pd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
@@ -447,9 +473,12 @@ void Q3E_Immersive_Run(cp_layer_renderer_t layer_renderer)
             [blit endEncoding];
         }
         id<MTLTexture> eyeTex[2] = { q3e_eyeCopy[0], q3e_eyeCopy[1] };
-        id<MTLTexture> color = cp_drawable_get_color_texture(drawable, 0);
-        id<MTLTexture> depth = cp_drawable_get_depth_texture(drawable, 0);
         size_t views = cp_drawable_get_view_count(drawable);
+        // Foveation rate maps (guide step 3): zero when foveation is off, per-eye
+        // when on (.dedicated layout). Each pass MUST rasterize with its own eye's
+        // map — the compositor unwarps each eye with that eye's map, and a mismatch
+        // is the right-eye-fisheye trap.
+        size_t nRateMaps = cp_drawable_get_rasterization_rate_map_count(drawable);
 
         // world->model: the captured head-relative screen placement, scaled to size.
         // (Fall back to a fixed spot if tracking hasn't produced a pose yet.) Height is
@@ -468,7 +497,7 @@ void Q3E_Immersive_Run(cp_layer_renderer_t layer_renderer)
         int drawFPS = Q3E_FPSCounterEnabled() && q3e_textPipeline != nil;
         simd_float4x4 fpsModel = matrix_identity_float4x4;
         if (drawFPS) {
-            q3e_update_fps_texture(color.device);
+            q3e_update_fps_texture(queue.device);   // queue was made from the drawable's device
             float halfH = halfW * aspect;
             float fw = halfW * 0.11f;                                  // overlay half-width
             float fh = fw * ((float)Q3E_FPS_TEX_H / (float)Q3E_FPS_TEX_W);
@@ -478,23 +507,38 @@ void Q3E_Immersive_Run(cp_layer_renderer_t layer_renderer)
         }
 
         for (size_t v = 0; v < views; v++) {
+            // Per-view pass targeting from the view's texture map (guide step 2):
+            // never assume texture 0 / slice v. Layered layout = one texture, slice
+            // per eye; dedicated layout (foveation on) = one texture PER eye, slice 0.
+            cp_view_t view = cp_drawable_get_view(drawable, v);
+            cp_view_texture_map_t tmap = cp_view_get_view_texture_map(view);
+            size_t texIdx = cp_view_texture_map_get_texture_index(tmap);
+            size_t slice  = cp_view_texture_map_get_slice_index(tmap);
+            MTLViewport vp = cp_view_texture_map_get_viewport(tmap);
+
             MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-            pass.colorAttachments[0].texture = color;
-            pass.colorAttachments[0].slice = v;        // this eye's array slice
+            pass.colorAttachments[0].texture = cp_drawable_get_color_texture(drawable, texIdx);
+            pass.colorAttachments[0].slice = slice;    // this eye's array slice
             pass.colorAttachments[0].loadAction = MTLLoadActionClear;
             pass.colorAttachments[0].storeAction = MTLStoreActionStore;
             pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+            id<MTLTexture> depth = cp_drawable_get_depth_texture(drawable, texIdx);
             if (depth) {
                 pass.depthAttachment.texture = depth;
-                pass.depthAttachment.slice = v;
+                pass.depthAttachment.slice = slice;
                 pass.depthAttachment.loadAction = MTLLoadActionClear;
                 pass.depthAttachment.storeAction = MTLStoreActionStore;
                 pass.depthAttachment.clearDepth = 1.0;
             }
+            if (nRateMaps > 0)
+                pass.rasterizationRateMap = cp_drawable_get_rasterization_rate_map(
+                    drawable, texIdx < nRateMaps ? texIdx : 0);
             // This eye's texture: its own stereo image if ready, else the mono frame.
             id<MTLTexture> tex = (v < 2 && eyeTex[v]) ? eyeTex[v] : monoTex;
 
             id<MTLRenderCommandEncoder> enc = [command_buffer renderCommandEncoderWithDescriptor:pass];
+            [enc setViewport:vp];   // the view's LOGICAL viewport (guide step 4) —
+                                    // with foveation the physical texture is smaller
             // Surroundings dim (drawn FIRST, under everything): fullscreen clip-space
             // quad (identity mvp through the shared vertex shader), premultiplied black
             // at the perceptual-mapped level. Skipped at 0% (pure passthrough).
@@ -509,7 +553,6 @@ void Q3E_Immersive_Run(cp_layer_renderer_t layer_renderer)
                 [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
             }
             if (tex && q3e_pipeline) {
-                cp_view_t view = cp_drawable_get_view(drawable, v);
                 simd_float4x4 deviceFromEye = cp_view_get_transform(view);
                 simd_float4x4 eyeFromOrigin = simd_inverse(simd_mul(originFromDevice, deviceFromEye));
                 simd_float4x4 proj = matrix_identity_float4x4;
@@ -525,11 +568,12 @@ void Q3E_Immersive_Run(cp_layer_renderer_t layer_renderer)
                                      (tex.pixelFormat == MTLPixelFormatBGRA8Unorm ||
                                       tex.pixelFormat == MTLPixelFormatRGBA8Unorm ||
                                       tex.pixelFormat == MTLPixelFormatRGBA16Unorm)) ? 1.0f : 0.0f;
+                float panelParams[2] = { panelDecode, 1.0f / q3e_panelGamma };
                 [enc setRenderPipelineState:q3e_pipeline];
                 [enc setDepthStencilState:q3e_depthState];
                 [enc setVertexBytes:&mvp length:sizeof(mvp) atIndex:0];
                 [enc setFragmentTexture:tex atIndex:0];
-                [enc setFragmentBytes:&panelDecode length:sizeof(panelDecode) atIndex:0];
+                [enc setFragmentBytes:panelParams length:sizeof(panelParams) atIndex:0];
                 [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 
                 if (drawFPS && q3e_fpsTex) {
@@ -545,7 +589,9 @@ void Q3E_Immersive_Run(cp_layer_renderer_t layer_renderer)
             [enc endEncoding];
         }
         if (q3e_immFrameCount == 2 || (q3e_immFrameCount % 240) == 0)
-            Q3E_BlackBox("imm: 0007 — FBO=%lux%lu pairs=%d rendFrames=%d | eyeL=%d eyeR=%d | srcFmt=%lu drawLin=%d mips=%lu",
+            Q3E_BlackBox("imm: rateMaps=%zu texCount=%zu | 0007 — FBO=%lux%lu pairs=%d rendFrames=%d | eyeL=%d eyeR=%d | srcFmt=%lu drawLin=%d mips=%lu",
+                         nRateMaps,
+                         cp_drawable_get_texture_count(drawable),
                          (unsigned long)(monoTex ? monoTex.width : 0),
                          (unsigned long)(monoTex ? monoTex.height : 0),
                          pairs, VK_Get3DFrames(),

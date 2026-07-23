@@ -85,7 +85,10 @@ int Q3E_LayerWidth(void)  { return (int)q3e_layer.drawableSize.width; }
 int Q3E_LayerHeight(void) { return (int)q3e_layer.drawableSize.height; }
 int Q3E_DisplayMaxFPS(void) {
 #if TARGET_OS_VISION
-    return 90; // visionOS compositor cadence; UIScreen is unavailable there
+    // UIScreen (and the panel's true max) is unqueryable on visionOS. Report the
+    // ceiling the shell requests from CADisplayLink: 120 on the M5 Vision Pro,
+    // clamped to 90 by the OS on earlier panels. (Feeds glconfig.displayFrequency.)
+    return 120;
 #else
     return (int)UIScreen.mainScreen.maximumFramesPerSecond;
 #endif

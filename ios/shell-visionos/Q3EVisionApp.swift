@@ -61,10 +61,29 @@ struct Q3ECompositorConfiguration: CompositorLayerConfiguration {
         // Query supported layouts so we never request an unsupported combination
         // (that makes openImmersiveSpace fail with a generic .error).
         let layouts = capabilities.supportedLayouts(options: [])
-        configuration.layout = layouts.contains(.layered) ? .layered : .dedicated
-        configuration.isFoveationEnabled = false   // M0: keep it simple
+        // Eye-tracked foveation (VISIONOS-FOVEATION-GUIDE.md): the drawable becomes
+        // gaze-tracked variable-density — effective foveal resolution multiplies and
+        // the panel blur is gone, at NEGATIVE GPU cost (fewer total fragments). The
+        // old "foveation off" was a vkQuake Vulkan-era constraint this native-Metal
+        // pass never had. Always on where supported (device-verified, table stakes);
+        // the simulator reports supportsFoveation false -> plain layered path.
+        let fov = capabilities.supportsFoveation
+        configuration.isFoveationEnabled = fov
+        // TRAP (guide): .layered + one-render-pass-per-slice + foveation rasterizes
+        // BOTH eyes with layer 0's rate map while the compositor unwarps each eye
+        // with its own -> right-eye fisheye. Dedicated layout gives each eye its own
+        // texture AND rate map; Q3EImmersive.m targets passes via the view texture
+        // map, so it handles either layout.
+        if fov && layouts.contains(.dedicated) {
+            configuration.layout = .dedicated
+        } else {
+            configuration.layout = layouts.contains(.layered) ? .layered : .dedicated
+        }
+        // Do NOT touch maxRenderQuality: requesting a raised value aborts at
+        // immersive entry (guide trap 2); foveation alone delivers the win.
         configuration.colorFormat = capabilities.supportedColorFormats.first ?? .bgra8Unorm_srgb
         configuration.depthFormat = capabilities.supportedDepthFormats.first ?? .depth32Float
+        Q3E_BlackBox_Str("Swift: layer config — foveation \(fov ? "ON" : "off"), layout \(configuration.layout == .dedicated ? "dedicated" : "layered")")
     }
 }
 

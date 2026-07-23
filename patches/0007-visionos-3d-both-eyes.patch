@@ -75,7 +75,7 @@
  		else
 --- a/code/renderervk/tr_backend.c
 +++ b/code/renderervk/tr_backend.c
-@@ -1444,6 +1444,21 @@
+@@ -1444,6 +1444,28 @@
  #ifdef USE_VULKAN
  	vk_begin_frame();
  
@@ -88,6 +88,13 @@
 +	{
 +		extern void vk_stereo3d_snapshot( int idx );
 +		if ( cmd->buffer == 2 ) {
++			// Flush the LEFT field's final still-batched 2D draws FIRST: 2D quads
++			// batch in tess until a shader change, so the field's last batch (the
++			// menu cursor draws last, alone in its batch) would otherwise miss this
++			// snapshot and flush into the RIGHT field — a right-eye-only cursor,
++			// and double-blended translucent fills in the right eye.
++			if ( tess.numIndexes )
++				RB_EndSurface();
 +			vk_end_render_pass();
 +			vk_stereo3d_snapshot( 0 );
 +			vk_begin_main_render_pass();
