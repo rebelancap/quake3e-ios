@@ -13,7 +13,7 @@
 void Q3E_Input_SetGyro(int enabled, float scale);
 void Q3E_Input_SetTouchSens(float sx, float sy);
 void Q3E_Input_SetControlStyle(float scale, float alpha);
-void Q3E_ConsoleBridge_Start(void);
+void Q3E_EnableConsoleBridge(void);   // ios_glue.c — opens the port AND arms the drain
 void Q3E_Input_BeginLayoutEdit(void);
 void Q3E_Shell_SetRefreshMode(int mode60);  // 0 = native/120, 1 = 60
 void Q3E_Shell_SetFPSCounter(int enabled);
@@ -447,7 +447,7 @@ void Q3E_Settings_ApplyAll(void) {
     [d setBool:_remoteConsoleSwitch.on forKey:DEF_REMOTE_CONSOLE];
     // Start it the moment it is switched on, so it needs no relaunch. Switching
     // off takes effect next launch (the listener is not torn down mid-session).
-    if (_remoteConsoleSwitch.on) Q3E_ConsoleBridge_Start();
+    if (_remoteConsoleSwitch.on) Q3E_EnableConsoleBridge();
 #endif
     [d setBool:_invertSwitch.on forKey:DEF_INVERT];
     [d setFloat:_fovSlider.value forKey:DEF_FOV];

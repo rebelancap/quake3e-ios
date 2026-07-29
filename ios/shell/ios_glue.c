@@ -58,6 +58,17 @@ void Q3E_ConsoleBridge_Drain(void);
 void Q3E_ConsoleBridge_Output(const char *text);
 static qboolean q3e_bridge_active = qfalse;
 
+// The settings switch must go through THIS, not straight to
+// Q3E_ConsoleBridge_Start(). Opening the socket is only half of it:
+// q3e_bridge_active is what makes Q3E_Frame drain queued commands into Cbuf and
+// Sys_Print tee output back to the client. Starting the listener alone gave a
+// port that accepted connections, echoed the banner, and then ignored
+// everything — which is exactly how it behaved when toggled on mid-session.
+void Q3E_EnableConsoleBridge(void) {
+	q3e_bridge_active = qtrue;
+	Q3E_ConsoleBridge_Start();
+}
+
 void q3e_console_command(const char *text) {
 	Cbuf_AddText(text);
 	Cbuf_AddText("\n");

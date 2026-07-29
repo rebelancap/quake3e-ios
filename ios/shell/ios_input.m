@@ -739,13 +739,15 @@ static void q3e_no_implicit_actions(CALayer *l) {
         c.layer = layer; c.ident = ident; c.baseRadius = r; c.zoneOnly = zoneOnly; c.defaultPos = def;
         [self->_controls addObject:c];
     };
+    // Positions below marked "arranged on device" were dragged into place on a
+    // phone and read back with `touchedit print`, then promoted to defaults.
     reg(_stickZone, @"stick", STICK_ZONE_R, YES,
-        ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width * MOVE_ZONE_FRAC * 0.5f, sz.height * 0.62f); });
-    reg(_fireCircle,   @"fire",   FIRE_RADIUS,   NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 95 * k,  sz.height - 105 * k); });
-    reg(_jumpCircle,   @"jump",   JUMP_RADIUS,   NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 95 * k,  sz.height - 215 * k); });
+        ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width * 0.220f, sz.height * 0.641f); }); // arranged on device
+    reg(_fireCircle,   @"fire",   FIRE_RADIUS,   NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width * 0.822f, sz.height * 0.714f); }); // arranged on device
+    reg(_jumpCircle,   @"jump",   JUMP_RADIUS,   NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width * 0.913f, sz.height * 0.530f); }); // arranged on device
     reg(_wnextCircle,  @"wnext",  WPN_RADIUS,    NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 58 * k,  sz.height - 300 * k); });
     reg(_wprevCircle,  @"wprev",  WPN_RADIUS,    NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 132 * k, sz.height - 300 * k); });
-    reg(_crouchCircle, @"crouch", CROUCH_RADIUS, NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 215 * k, sz.height - 85 * k); });
+    reg(_crouchCircle, @"crouch", CROUCH_RADIUS, NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width * 0.923f, sz.height * 0.859f); }); // arranged on device
     reg(_menuButton,   @"menu",   24.0f,         NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 48, 42); });
     reg(_gearButton,   @"gear",   24.0f,         NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(48, 42); });
     [self loadControlPositions];
