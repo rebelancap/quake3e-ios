@@ -9,6 +9,7 @@
 // in ios_glue.c.
 
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>   // UIApplicationDidBecomeActiveNotification (re-arm)
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -89,14 +90,29 @@ static void accept_client(void) {
 }
 
 void Q3E_ConsoleBridge_Start(void) {
-    // Idempotent: the settings switch can call this mid-session, and boot may
-    // already have started it from the env var.
-    static BOOL started = NO;
-    if (started) return;
-    started = YES;
-    bridge_queue = dispatch_queue_create("q3e.console.bridge", DISPATCH_QUEUE_SERIAL);
-    cmd_lock = [NSLock new];
-    cmd_queue = [NSMutableArray array];
+    // Re-armable, not one-shot. iOS SUSPENDS a backgrounded app and tears its
+    // sockets down, so a bridge started once was dead the moment you left the
+    // app — switch it on, go to the home screen or let the screen lock, and the
+    // port was gone until the next launch with no sign anything had happened.
+    // Guard on the LISTENER being alive and re-arm on foreground.
+    static BOOL observing = NO;
+    if (listen_fd >= 0) return;          // already listening
+    if (!bridge_queue) {
+        bridge_queue = dispatch_queue_create("q3e.console.bridge", DISPATCH_QUEUE_SERIAL);
+        cmd_lock = [NSLock new];
+        cmd_queue = [NSMutableArray array];
+    }
+    if (!observing) {
+        observing = YES;
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification
+            object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+                if (listen_fd < 0) {
+                    NSLog(@"Q3E console bridge: re-arming after foreground");
+                    Q3E_ConsoleBridge_Start();
+                }
+            }];
+    }
+    if (listen_src) { dispatch_source_cancel(listen_src); listen_src = nil; }
 
     listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     int one = 1;
