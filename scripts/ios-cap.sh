@@ -1,4 +1,7 @@
 #!/bin/bash
+# Device identifiers come from an untracked local file (see
+# scripts/device.local.sh.example) or the environment — never hardcoded here.
+[ -f "$(dirname "$0")/device.local.sh" ] && . "$(dirname "$0")/device.local.sh"
 # ios-cap.sh — from a RUNNING app (console bridge up), grab a screenshot and a
 # few seconds of console (Q3E_FT lines), and pull the screenshot to artifacts/.
 # The same-run content artifact the charter requires next to any perf number.
@@ -6,9 +9,9 @@
 # Usage: ios-cap.sh <tag> [seconds]   (app must be running with Q3E_CONSOLE=1)
 set -euo pipefail
 cd "$(dirname "$0")/.."
-DEV=00000000-0000-0000-0000-000000000000
+DEV="${DEVICE_UDID:?set DEVICE_UDID (see scripts/device.local.sh.example)}"
 BUNDLE=com.rebelancap.quake3e
-HOST=my-iphone.local
+HOST="${DEVICE_HOST:-my-iphone.local}"
 PORT=27999
 TAG="${1:-cap}"
 SECS="${2:-14}"

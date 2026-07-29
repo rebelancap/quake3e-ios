@@ -1,4 +1,7 @@
 #!/bin/bash
+# Device identifiers come from an untracked local file (see
+# scripts/device.local.sh.example) or the environment — never hardcoded here.
+[ -f "$(dirname "$0")/device.local.sh" ] && . "$(dirname "$0")/device.local.sh"
 # ios-trace.sh — capture an Instruments trace of Quake3e during live play on
 # the device, over USB. Answers the Phase 3 questions the in-engine frame
 # timer structurally cannot: CPU core residency (P vs E cores — the charter's
@@ -17,13 +20,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
-UDID="00000000-0000-0000-0000-000000000000" # the test device, devicectl UDID (launch)
+UDID="${DEVICE_UDID:?set DEVICE_UDID (see scripts/device.local.sh.example)}" # devicectl UDID (launch)
 # xctrace uses a DIFFERENT registry than devicectl — USB-oriented, hardware
-# UDID. the test device is 00000000-000000000000000 there (a second device is
-# ...########...; do not trace that one). It must be ONLINE (USB + unlocked).
-XCID="00000000-000000000000000"
+# UDID, so it needs its own id. Check you are pointing at the intended device if
+# more than one is attached. It must be ONLINE (USB + unlocked).
+XCID="${DEVICE_XCID:?set DEVICE_XCID (see scripts/device.local.sh.example)}"
 BUNDLE="com.rebelancap.quake3e"
-HOST="my-iphone.local"
+HOST="${DEVICE_HOST:-my-iphone.local}"
 PORT=27999
 
 # xctrace needs the developer disk image mounted AND the phone unlocked; a

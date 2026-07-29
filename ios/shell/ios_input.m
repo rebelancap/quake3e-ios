@@ -1116,7 +1116,7 @@ static void q3e_no_implicit_actions(CALayer *l) {
 }
 
 // ---- layout editor --------------------------------------------------------
-// Chrome copied from Shipwright (the maintainer's reference UX) and matching vkQuake
+// Chrome copied from Shipwright (the reference UX) and matching vkQuake
 // 1.0.4: reset · live scale slider with a percentage · done, bottom-left. No
 // instruction text — dragging is self-evident once you are in here.
 // x/y are 0..1 of the view. Mirrors what a finger does, via the same methods.

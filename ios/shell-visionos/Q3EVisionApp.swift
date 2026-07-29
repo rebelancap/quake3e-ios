@@ -107,7 +107,7 @@ struct Q3ERootView: View {
     var body: some View {
         Q3EWindowView()
             .ignoresSafeArea()
-            // 3D toggle + settings gear hang fully BELOW the window (the maintainer's preferred
+            // 3D toggle + settings gear hang fully BELOW the window (the preferred
             // layout, via the vkQuake recipe): anchor .scene(.bottom) with
             // contentAlignment .top pins the pill's TOP to the window's bottom edge —
             // no straddling/overlap of the game content (an ornament's default center

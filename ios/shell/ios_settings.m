@@ -1,5 +1,5 @@
 // ios_settings.m — the in-app iOS settings sheet (charter Phase 2 item,
-// scoped per the maintainer's direction: gyro aim, FPS counter, touch look
+// scoped deliberately: gyro aim, FPS counter, touch look
 // sensitivity, refresh rate). Long-press the ≡ button to open.
 //
 // These are SHELL settings (NSUserDefaults), deliberately not engine
@@ -73,11 +73,11 @@ int Q3E_RemoteConsoleEnabled(void) {
 #define DEF_FOCUS_3D    @"q3e_focus_3d"     // stereo convergence plane (r_zproj, game units)
 #define DEF_DIM_3D      @"q3e_dim_3d"       // surroundings dimming (0..1, perceptual curve)
 
-// Stereo depth default/range (on-device testing, on-device): the old slider's 40% floor was the
+// Stereo depth default/range (measured on-device): the old slider's 40% floor was the
 // comfortable value and 140%+ was overbearing — and the numbers are an arbitrary
 // parallax divisor, not calibrated to IPD (physical disparity also depends on the
 // user-adjustable panel size/distance), so the scale is ours to define. The slider
-// spans 0.1–1.0. Default 60%: after both-eyes-per-frame landed (D-022) testing found
+// spans 0.1–1.0. Default 60%: after both-eyes-per-frame landed (D-022) on-device testing found
 // higher depth comfortable — much of the old strain was alternation judder itself.
 #define Q3E_DEPTH_DEFAULT 0.6f
 
@@ -89,12 +89,12 @@ int Q3E_RemoteConsoleEnabled(void) {
 // normalized by (focus/64) so changing focus does NOT change perceived depth strength.
 #define Q3E_FOCUS_DEFAULT 160.0f
 #define Q3E_DIM_DEFAULT   0.8f
-// Default brightness 1.2 (on-device testing, on-device): stock 1.0 reads dark on the
+// Default brightness 1.2 (measured on-device): stock 1.0 reads dark on the
 // headset panel and on phones. Deliberately NOT part of reset3DDefaults —
 // that button restores only the 3D-section placement/depth values.
 #define Q3E_BRIGHT_DEFAULT 1.2f
 
-// Look-sensitivity display rescale (on-device testing, on-pad): sliders show a clean
+// Look-sensitivity display rescale (measured on-pad): sliders show a clean
 // 0.5–10; the applied gain is displayed x 1.2, so the ceiling equals the old
 // 12 he wanted headroom for and the default displayed 5.0 = actual 6.0 (his
 // on-device pick, ~1.7x the old pad baseline). Stored values are in DISPLAYED
@@ -264,7 +264,7 @@ void Q3E_Settings_ApplyAll(void) {
     _dimSlider = [self makeSlider:0.0 max:1.0 value:def_float(DEF_DIM_3D, Q3E_DIM_DEFAULT)];
     _dimValue = [self label:@"" size:14 bold:NO];
     _unitsSeg = [[UISegmentedControl alloc] initWithItems:@[@"m", @"ft"]];
-    // Feet by default (on-device); metric persists once the user picks it.
+    // Feet by default; metric persists once the user picks it.
     _unitsSeg.selectedSegmentIndex = ([d objectForKey:DEF_UNITS_FT] ? [d boolForKey:DEF_UNITS_FT] : YES) ? 1 : 0;
     [_unitsSeg addTarget:self action:@selector(changed) forControlEvents:UIControlEventValueChanged];
     _distSlider = [self makeSlider:1.5 max:6.0 value:def_float(DEF_DIST_3D, 3.6f)];
@@ -480,7 +480,7 @@ void Q3E_Settings_ApplyAll(void) {
 #if TARGET_OS_VISION
 // Restore the tuned 3D defaults (the values dialed in during bring-up).
 - (void)reset3DDefaults {
-    _hideGunSwitch.on = NO;       // gun visible by default (on-device testing, post-D-022)
+    _hideGunSwitch.on = NO;       // gun visible by default (post-D-022)
     _hideHeadSwitch.on = YES;
     _depthSlider.value = Q3E_DEPTH_DEFAULT;   // 60% — comfort pick after both-eyes fix
     _focusSlider.value = Q3E_FOCUS_DEFAULT;   // convergence out where combat happens

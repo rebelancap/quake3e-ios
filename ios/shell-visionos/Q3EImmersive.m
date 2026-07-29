@@ -4,7 +4,7 @@
 // rendering goes through CompositorServices, which vends per-eye Metal drawable
 // textures and the ARKit head pose each frame. This file owns that render loop.
 //
-// ARCHITECTURE (the "3D screen" chosen — a world-locked stereoscopic
+// ARCHITECTURE (the chosen "3D screen" — a world-locked stereoscopic
 // display, controller-aimed, head-stable):
 //   1. The game renders its scene STEREO (Quake3e's built-in two-eye path, with
 //      an IPD horizontal offset) into two offscreen Vulkan images. Because our

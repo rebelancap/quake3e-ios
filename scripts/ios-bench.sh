@@ -1,4 +1,7 @@
 #!/bin/bash
+# Device identifiers come from an untracked local file (see
+# scripts/device.local.sh.example) or the environment — never hardcoded here.
+[ -f "$(dirname "$0")/device.local.sh" ] && . "$(dirname "$0")/device.local.sh"
 # ios-bench.sh — launch Quake3e into a scenario FOREGROUND, verify it is
 # actually rendering, then capture the engine's own Q3E_FT telemetry (wall /
 # engine-frame / sim-rate / thermal, one line per ~5s window) over N seconds
@@ -9,9 +12,9 @@
 #   ios-bench.sh stress-msaa 90 "+set r_ext_multisample 8 +set sv_pure 0 +set bot_minplayers 12 +map q3dm17"
 set -euo pipefail
 cd "$(dirname "$0")/.."
-DEV=00000000-0000-0000-0000-000000000000
+DEV="${DEVICE_UDID:?set DEVICE_UDID (see scripts/device.local.sh.example)}"
 BUNDLE=com.rebelancap.quake3e
-HOST=my-iphone.local; PORT=27999
+HOST="${DEVICE_HOST:-my-iphone.local}"; PORT=27999
 TAG="${1:?tag}"; SECS="${2:?seconds}"; ARGS="${3:-}"
 OUT=artifacts/runs; mkdir -p "$OUT"
 

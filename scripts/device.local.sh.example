@@ -1,0 +1,11 @@
+# Copy to scripts/device.local.sh and fill in YOUR device. That file is
+# gitignored: device identifiers and hostnames are personal data and must never
+# be committed. Every script here sources it when present, and otherwise falls
+# back to the environment.
+#
+#   DEVICE_UDID  — `xcrun devicectl list devices` (install/launch)
+#   DEVICE_XCID  — `xcrun xctrace list devices` (USB/hardware UDID; different registry)
+#   DEVICE_HOST  — the phone's mDNS name, for the remote console
+DEVICE_UDID="00000000-0000000000000000"
+DEVICE_XCID="00000000-000000000000000"
+DEVICE_HOST="my-iphone.local"

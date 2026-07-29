@@ -1,4 +1,7 @@
 #!/bin/bash
+# Device identifiers come from an untracked local file (see
+# scripts/device.local.sh.example) or the environment — never hardcoded here.
+[ -f "$(dirname "$0")/device.local.sh" ] && . "$(dirname "$0")/device.local.sh"
 # Interactive remote console for quake3e on the iPhone.
 #
 #   ./scripts/ios-console.sh                     # launch app + attach console
@@ -15,9 +18,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
-DEVICE="00000000-0000-0000-0000-000000000000"
+DEVICE="${DEVICE_UDID:?set DEVICE_UDID (see scripts/device.local.sh.example)}"
 BUNDLE=com.rebelancap.quake3e
-HOST="my-iphone.local"
+HOST="${DEVICE_HOST:-my-iphone.local}"
 PORT=27999
 DO_DEPLOY=0
 

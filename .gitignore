@@ -36,3 +36,6 @@ ios/Quake3e-sim.xcodeproj/
 
 # scratch — user screenshots etc, never part of the repo
 tmp/
+
+# local device identifiers — personal data, never committed
+scripts/device.local.sh

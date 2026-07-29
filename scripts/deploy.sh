@@ -1,4 +1,7 @@
 #!/bin/bash
+# Device identifiers come from an untracked local file (see
+# scripts/device.local.sh.example) or the environment — never hardcoded here.
+[ -f "$(dirname "$0")/device.local.sh" ] && . "$(dirname "$0")/device.local.sh"
 # deploy-spike.sh — build + install + data-verify + optional launch for the
 # iOS spike, encoding the device-loop facts from D-007:
 #   * every devicectl install rotates the data container → verify paks and
@@ -10,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
-UDID="00000000-0000-0000-0000-000000000000" # the test device
+UDID="${DEVICE_UDID:?set DEVICE_UDID (see scripts/device.local.sh.example)}"
 BUNDLE="com.rebelancap.quake3e"
 
 LAUNCH_ARGS=""

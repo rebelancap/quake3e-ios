@@ -54,7 +54,7 @@ static bool   q3e_windowParked = false;
 static UIView *q3e_curtain;   // "Playing in 3D" cover over the parked card
 
 // The parked card would otherwise show the FROZEN last 2D frame (gw_minimized) —
-// confusing floating next to the live panel (vkQuake note; found in testing). Cover
+// confusing floating next to the live panel (vkQuake note, found in testing). Cover
 // the window with a black curtain + label while parked.
 static void q3e_set_curtain(bool show) {
     [q3e_curtain removeFromSuperview];
