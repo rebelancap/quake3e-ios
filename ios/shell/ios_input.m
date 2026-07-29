@@ -35,6 +35,7 @@ void Q3E_QueueNamedKey(const char *name, int down);
 void Q3E_QueueChar(int ch);
 void Q3E_QueueCommand(const char *cmd); // run a console command (e.g. centerview)
 int  Q3E_MenuMode(void); // UI/console catcher active or not in-world
+void Com_Printf(const char *fmt, ...) __attribute__((format(printf, 1, 2))); // engine console out
 const char *Q3E_CurrentGame(void);
 
 #define PAD_DEADZONE 0.15f
@@ -42,8 +43,8 @@ const char *Q3E_CurrentGame(void);
 #define MOVE_ZONE_FRAC   0.42f
 #define STICK_RADIUS     85.0f
 #define NUB_RADIUS       30.0f
-#define FIRE_RADIUS      54.0f
-#define JUMP_RADIUS      42.0f
+#define FIRE_RADIUS      50.0f
+#define JUMP_RADIUS      39.0f
 #define TAP_SLOP         12.0f
 #define LOOK_SENS_DEFAULT 3.5f
 #define PAD_LOOK_SPEED  11.0f    // gameplay look gain (was 16 — softened accel)
@@ -53,7 +54,6 @@ static float look_sens_x = LOOK_SENS_DEFAULT;
 static float look_sens_y = LOOK_SENS_DEFAULT;
 static float ctl_scale = 1.0f;   // control size multiplier
 static float ctl_alpha = 1.0f;   // control opacity multiplier
-static int   ctl_lefty = 0;      // mirrored layout
 static char uimap_mode = 'c';               // Q3E_UIMAP env: c|p|l
 
 // Cursor-delta multiplier (Q3E_UIDELTA env). Stock 1.32 UI: 1.0.
@@ -66,8 +66,31 @@ static float uidelta_mult = 1.0f;
 
 void Q3E_PresentSettings(UIView *fromView); // ios_settings.m
 
-#define WPN_RADIUS       30.0f
-#define CROUCH_RADIUS    38.0f
+#define WPN_RADIUS       28.0f
+// Crouch is deliberately smaller than jump, independent of the rest: it is used
+// far less often and does not need jump's target size.
+#define CROUCH_RADIUS    30.0f
+#define STICK_ZONE_R    150.0f   // move-stick activation zone (editor-draggable)
+
+// A placeable on-screen control. Position is stored as a UNIT fraction of the
+// view once the player has customised it; until then the shipped default block
+// runs, which keeps the original edge-anchored, scale-aware placement exactly.
+@interface Q3EControl : NSObject
+@property (nonatomic) CAShapeLayer *layer;
+@property (nonatomic, copy) NSString *ident;   // save key — renaming resets that
+                                               // control for everyone
+@property (nonatomic) CGFloat baseRadius;
+@property (nonatomic) CGPoint unit;
+@property (nonatomic) BOOL hasSaved;
+@property (nonatomic) BOOL zoneOnly;           // move zone: never pressable
+@property (nonatomic, copy) CGPoint (^defaultPos)(CGSize sz, CGFloat k);
+@end
+@implementation Q3EControl @end
+
+static NSString *q3e_pos_key(NSString *ident, const char *axis) {
+    return [NSString stringWithFormat:@"q3e_btn_%@_%s", ident, axis];
+}
+#define DEF_LAYOUT_SET @"q3e_layoutSet"
 
 // Gyro aim: enabled by Q3E_GYRO=<scale> (e.g. 2.0). Landscape-right axis
 // mapping/signs are a first guess — tune with hands-on feedback before
@@ -358,6 +381,37 @@ void Q3E_Input_Frame(void) {
     gyro_poll(menuMode, dt);
 }
 
+// Layout editor entry points (settings sheet calls these; the env var opens it
+// at launch so the simulator can screenshot it without a finger).
+@interface Q3EInputView (LayoutEditor)
+- (void)beginEditingLayout;
+- (void)endEditingLayout;
+- (BOOL)isEditingLayout;
+- (void)fakeTouchAt:(CGPoint)nrm phase:(int)phase;
+- (void)printLayout;
+@end
+
+static __weak Q3EInputView *q3e_input_view = nil;
+void Q3E_Input_BeginLayoutEdit(void) {
+    [q3e_input_view beginEditingLayout];
+}
+
+void Q3E_Input_ToggleLayoutEdit(void) {
+    Q3EInputView *v = q3e_input_view;
+    if (!v) return;
+    if ([v isEditingLayout]) [v endEditingLayout]; else [v beginEditingLayout];
+}
+
+// Synthetic finger for the layout editor — drives the SAME drag path the real
+// touch handlers use, not a parallel copy.
+void Q3E_Input_FakeTouch(float nx, float ny, int phase) {
+    [q3e_input_view fakeTouchAt:CGPointMake(nx, ny) phase:phase];
+}
+
+void Q3E_Input_PrintLayout(void) {
+    [q3e_input_view printLayout];
+}
+
 // live setters driven by the iOS settings sheet
 void Q3E_Input_SetTouchSens(float sx, float sy) {
     look_sens_x = sx;
@@ -378,10 +432,9 @@ void Q3E_Input_SetFireHaptics(int on) {
 #endif
 }
 
-void Q3E_Input_SetControlStyle(float scale, float alpha, int lefty) {
+void Q3E_Input_SetControlStyle(float scale, float alpha) {
     ctl_scale = scale;
     ctl_alpha = alpha;
-    ctl_lefty = lefty;
     [NSNotificationCenter.defaultCenter postNotificationName:@"Q3EControlStyleChanged" object:nil];
 }
 
@@ -419,6 +472,14 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
     CGPoint _tapStart;
     CAShapeLayer *_stickBase, *_stickNub, *_fireCircle, *_jumpCircle;
     CAShapeLayer *_wnextCircle, *_wprevCircle, *_crouchCircle, *_menuButton, *_gearButton;
+    CAShapeLayer *_stickZone;                   // drawn only while editing
+    NSMutableArray<Q3EControl *> *_controls;
+    BOOL _editing;
+    Q3EControl *_dragCtl;
+    CGSize _dragOffset;
+    UIView *_editBar;
+    UISlider *_editSlider;
+    UILabel *_editPct;
     NSTimer *_modeTimer;
     BOOL _menuMode;
     BOOL _padConnected;
@@ -520,23 +581,41 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
         _wprevCircle = [self circleLayer:WPN_RADIUS alpha:0.16];
         _crouchCircle = [self circleLayer:CROUCH_RADIUS alpha:0.18];
         // ≡ (top-right) = ESC / "Start". Bigger glyph, centered to fill the button.
-        _menuButton = [self circleLayer:26.0f alpha:0.16];
-        [self addGlyph:@"≡" toLayer:_menuButton radius:26.0f size:40 dx:0 dy:-3];
+        _menuButton = [self circleLayer:24.0f alpha:0.16];
+        [self addGlyph:@"≡" toLayer:_menuButton radius:24.0f size:37 dx:0 dy:-3];
         // ⚙ (top-left) = open the iOS settings sheet. Shown only while a menu is up (any
         // input); replaces the old, easily-forgotten long-press on ≡.
-        _gearButton = [self circleLayer:26.0f alpha:0.16];
-        [self addSymbol:@"gearshape.fill" toLayer:_gearButton size:26];
+        _gearButton = [self circleLayer:24.0f alpha:0.16];
+        [self addSymbol:@"gearshape.fill" toLayer:_gearButton size:24];
         _gearButton.hidden = YES;
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(keyboardWillShow:)
             name:UIKeyboardWillShowNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(keyboardWillHide:)
             name:UIKeyboardWillHideNotification object:nil];
         _stickBase.hidden = _stickNub.hidden = YES;
-        [self addLabel:@"FIRE" toLayer:_fireCircle radius:FIRE_RADIUS size:15];
-        [self addLabel:@"JUMP" toLayer:_jumpCircle radius:JUMP_RADIUS size:15];
-        [self addLabel:@"W+" toLayer:_wnextCircle radius:WPN_RADIUS size:15];
-        [self addLabel:@"W-" toLayer:_wprevCircle radius:WPN_RADIUS size:15];
-        [self addLabel:@"DUCK" toLayer:_crouchCircle radius:CROUCH_RADIUS size:15];
+        // Glyphs, not words (matching vkQuake 1.0.4): a crosshair reads as fire
+        // instantly, "FIRE" does not.
+        [self addSymbol:@"scope" toLayer:_fireCircle size:31 fallback:@"FIRE" radius:FIRE_RADIUS];
+        [self addSymbol:@"arrow.up" toLayer:_jumpCircle size:24 fallback:@"JUMP" radius:JUMP_RADIUS];
+        [self addSymbol:@"arrowtriangle.forward.fill" toLayer:_wnextCircle size:17 fallback:@"W+" radius:WPN_RADIUS];
+        [self addSymbol:@"arrowtriangle.backward.fill" toLayer:_wprevCircle size:17 fallback:@"W-" radius:WPN_RADIUS];
+        [self addSymbol:@"arrow.down" toLayer:_crouchCircle size:19 fallback:@"DUCK" radius:CROUCH_RADIUS];
+
+        // Move-stick activation zone. The stick FLOATS to the thumb, so it has no
+        // position of its own — what it has is this zone, which is placeable like
+        // everything else. Invisible in play, drawn in the editor at its true
+        // radius. Replaces the old lefty mirror: stick-on-the-right is now a drag.
+        _stickZone = [self circleLayer:STICK_ZONE_R alpha:0.05];
+        _stickZone.hidden = YES;
+
+        [self buildControlRegistry];
+        q3e_input_view = self;
+        ctl_scale = [NSUserDefaults.standardUserDefaults objectForKey:@"q3e_ctl_scale"]
+                        ? [NSUserDefaults.standardUserDefaults floatForKey:@"q3e_ctl_scale"] : ctl_scale;
+        if (getenv("Q3E_TOUCHEDIT")) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ [self beginEditingLayout]; });
+        }
         _modeTimer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) {
             [self syncMode];
         }];
@@ -544,8 +623,23 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
     return self;
 }
 
+// A manually-created CALayer animates EVERY property change implicitly (~0.25 s
+// ease-in-out). UIView's own backing layer suppresses that; a raw sublayer does
+// not — so every position assignment here was being animated. That is why the
+// editor felt laggy to drag, and, worse, why the floating move stick's nub
+// trailed the thumb by a quarter second during play (touchesMoved sets
+// _stickNub.position every frame). Nulling the actions makes all of it instant.
+static void q3e_no_implicit_actions(CALayer *l) {
+    l.actions = @{
+        @"position": [NSNull null], @"bounds": [NSNull null], @"path": [NSNull null],
+        @"hidden": [NSNull null],   @"opacity": [NSNull null], @"contents": [NSNull null],
+        @"fillColor": [NSNull null], @"strokeColor": [NSNull null], @"transform": [NSNull null],
+    };
+}
+
 - (CAShapeLayer *)circleLayer:(CGFloat)r alpha:(CGFloat)a {
     CAShapeLayer *l = [CAShapeLayer layer];
+    q3e_no_implicit_actions(l);
     l.path = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(-r, -r, 2 * r, 2 * r)].CGPath;
     l.fillColor = [UIColor colorWithWhite:1.0 alpha:a].CGColor;
     l.strokeColor = [UIColor colorWithWhite:1.0 alpha:a + 0.15].CGColor;
@@ -562,6 +656,7 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
     t.foregroundColor = [UIColor colorWithWhite:1.0 alpha:0.55].CGColor;
     t.frame = CGRectMake(-r, -size * 0.6f, 2 * r, size * 1.33f);
     t.contentsScale = self.traitCollection.displayScale ?: 2.0; // UIScreen n/a on visionOS
+    q3e_no_implicit_actions(t);
     [layer addSublayer:t];
 }
 
@@ -576,10 +671,24 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
     t.foregroundColor = [UIColor colorWithWhite:1.0 alpha:0.72].CGColor;
     t.frame = CGRectMake(-r + dx, -size * 0.6f + dy, 2 * r, size * 1.33f);
     t.contentsScale = self.traitCollection.displayScale ?: 2.0;
+    q3e_no_implicit_actions(t);
     [layer addSublayer:t];
 }
 
 // A flat white SF Symbol centred in a button — crisper + monochrome vs. an emoji glyph.
+// Glyph with a WORD fallback: if the symbol name is unknown on this OS the
+// label stays, rather than leaving a blank circle.
+- (void)addSymbol:(NSString *)name toLayer:(CALayer *)layer size:(CGFloat)pt
+         fallback:(NSString *)word radius:(CGFloat)r {
+    UIImage *probe = [UIImage systemImageNamed:name];
+    if (!probe) {
+        NSLog(@"Q3E SF Symbol '%@' unavailable — keeping text label '%@'", name, word);
+        [self addLabel:word toLayer:layer radius:r size:15];
+        return;
+    }
+    [self addSymbol:name toLayer:layer size:pt];
+}
+
 - (void)addSymbol:(NSString *)name toLayer:(CALayer *)layer size:(CGFloat)pt {
     UIImageSymbolConfiguration *cfg =
         [UIImageSymbolConfiguration configurationWithPointSize:pt weight:UIImageSymbolWeightRegular];
@@ -598,6 +707,7 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
     l.contentsGravity = kCAGravityResizeAspect;
     l.frame = CGRectMake(-sym.size.width / 2, -sym.size.height / 2, sym.size.width, sym.size.height);
     l.contentsScale = flat.scale;
+    q3e_no_implicit_actions(l);
     [layer addSublayer:l];
 }
 
@@ -617,26 +727,101 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
     [self setNeedsLayout];
 }
 
+// Register every placeable control with its ident and its ORIGINAL placement
+// rule. Keeping the default as a block (rather than converting to unit numbers)
+// means the shipped layout is pixel-identical to before on every screen size —
+// only a customised control switches to unit coordinates.
+- (void)buildControlRegistry {
+    _controls = [NSMutableArray array];
+    void (^reg)(CAShapeLayer *, NSString *, CGFloat, BOOL, CGPoint (^)(CGSize, CGFloat)) =
+        ^(CAShapeLayer *layer, NSString *ident, CGFloat r, BOOL zoneOnly, CGPoint (^def)(CGSize, CGFloat)) {
+        Q3EControl *c = [Q3EControl new];
+        c.layer = layer; c.ident = ident; c.baseRadius = r; c.zoneOnly = zoneOnly; c.defaultPos = def;
+        [self->_controls addObject:c];
+    };
+    reg(_stickZone, @"stick", STICK_ZONE_R, YES,
+        ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width * MOVE_ZONE_FRAC * 0.5f, sz.height * 0.62f); });
+    reg(_fireCircle,   @"fire",   FIRE_RADIUS,   NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 95 * k,  sz.height - 105 * k); });
+    reg(_jumpCircle,   @"jump",   JUMP_RADIUS,   NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 95 * k,  sz.height - 215 * k); });
+    reg(_wnextCircle,  @"wnext",  WPN_RADIUS,    NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 58 * k,  sz.height - 300 * k); });
+    reg(_wprevCircle,  @"wprev",  WPN_RADIUS,    NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 132 * k, sz.height - 300 * k); });
+    reg(_crouchCircle, @"crouch", CROUCH_RADIUS, NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 215 * k, sz.height - 85 * k); });
+    reg(_menuButton,   @"menu",   24.0f,         NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 48, 42); });
+    reg(_gearButton,   @"gear",   24.0f,         NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(48, 42); });
+    [self loadControlPositions];
+}
+
+- (void)loadControlPositions {
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    BOOL custom = [d boolForKey:DEF_LAYOUT_SET];
+    for (Q3EControl *c in _controls) {
+        c.hasSaved = custom && [d objectForKey:q3e_pos_key(c.ident, "x")] != nil;
+        if (c.hasSaved)
+            c.unit = CGPointMake([d floatForKey:q3e_pos_key(c.ident, "x")],
+                                 [d floatForKey:q3e_pos_key(c.ident, "y")]);
+    }
+    [self setNeedsLayout];
+}
+
+- (void)resetControlPositions {
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    for (Q3EControl *c in _controls) {
+        [d removeObjectForKey:q3e_pos_key(c.ident, "x")];
+        [d removeObjectForKey:q3e_pos_key(c.ident, "y")];
+    }
+    [d setBool:NO forKey:DEF_LAYOUT_SET];
+    [d setFloat:1.0f forKey:@"q3e_ctl_scale"];
+    ctl_scale = 1.0f;
+    [self applyControlStyle];
+    [self loadControlPositions];
+    _editSlider.value = 1.0f;
+    [self updateScaleLabel];
+    NSLog(@"Q3E touch layout reset to defaults");
+}
+
+- (Q3EControl *)placeableAt:(CGPoint)p {
+    Q3EControl *best = nil;   // smallest wins, so a button inside the stick circle stays grabbable
+    for (Q3EControl *c in _controls) {
+        CGFloat r = c.baseRadius * (c.zoneOnly ? 1.0f : ctl_scale);
+        CGFloat dx = p.x - c.layer.position.x, dy = p.y - c.layer.position.y;
+        if (dx * dx + dy * dy <= r * r && (!best || c.baseRadius < best.baseRadius))
+            best = c;
+    }
+    return best;
+}
+
+- (BOOL)pointInMoveZone:(CGPoint)p {
+    CGFloat dx = p.x - _stickZone.position.x, dy = p.y - _stickZone.position.y;
+    return dx * dx + dy * dy <= STICK_ZONE_R * STICK_ZONE_R;
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGSize s = self.bounds.size;
     CGFloat k = ctl_scale;
-    // lefty mirrors the game-control cluster; ≡ stays top-left
-    CGFloat (^mx)(CGFloat) = ^CGFloat(CGFloat fromRight) {
-        return ctl_lefty ? fromRight : (s.width - fromRight);
-    };
-    _fireCircle.position = CGPointMake(mx(95 * k), s.height - 105 * k);
-    _jumpCircle.position = CGPointMake(mx(95 * k), s.height - 215 * k);
-    _wnextCircle.position = CGPointMake(mx(58 * k), s.height - 300 * k);
-    _wprevCircle.position = CGPointMake(mx(132 * k), s.height - 300 * k);
-    _crouchCircle.position = CGPointMake(mx(215 * k), s.height - 85 * k);
-    _menuButton.position = CGPointMake(s.width - 48, 42); // top-right (≡ = ESC/Start)
-    _gearButton.position = CGPointMake(48, 42);           // top-left  (⚙ = settings)
+    for (Q3EControl *c in _controls) {
+        // NEVER reposition the control under the finger. layoutSubviews runs for
+        // all sorts of reasons mid-drag (the editor chrome's own Auto Layout, a
+        // bounds change, setNeedsLayout from applyControlStyle) and would snap the
+        // dragged control back to its saved/default spot for a frame — the
+        // "duplicate flashing nearby" — and worse, if it landed between the last
+        // touchesMoved and touchesEnded, commitDrag would then SAVE that reset
+        // position instead of where the finger let go.
+        if (c == _dragCtl) continue;
+        c.layer.position = c.hasSaved ? CGPointMake(c.unit.x * s.width, c.unit.y * s.height)
+                                      : c.defaultPos(s, k);
+    }
+    if (_editing) _stickBase.position = _stickNub.position = _stickZone.position;
 }
 
 - (void)syncMode {
     BOOL menu = Q3E_MenuMode() != 0;
-    BOOL pad = GCController.controllers.count > 0;
+    // Q3E_IGNORE_PAD: the Simulator forwards any controller paired to the MAC into
+    // the guest, which hides the whole touch overlay — so no sim screenshot could
+    // ever show the on-screen controls. Env-only, so it cannot fire on a device.
+    static int ignore_pad = -1;
+    if (ignore_pad < 0) ignore_pad = getenv("Q3E_IGNORE_PAD") ? 1 : 0;
+    BOOL pad = !ignore_pad && GCController.controllers.count > 0;
     if (menu != _menuMode || pad != _padConnected) {
         _menuMode = menu;
         _padConnected = pad;
@@ -672,6 +857,15 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
 }
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (_editing) {
+        CGPoint p = [touches.anyObject locationInView:self];
+        _dragCtl = [self placeableAt:p];
+        if (_dragCtl) {
+            _dragOffset = CGSizeMake(_dragCtl.layer.position.x - p.x, _dragCtl.layer.position.y - p.y);
+            NSLog(@"Q3E edit: grabbed %@", _dragCtl.ident);
+        }
+        return;
+    }
     if (event.allTouches.count >= 3) {
         // 3-finger tap: toggle the on-screen keyboard
         if (self.isFirstResponder) {
@@ -698,9 +892,7 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
         if (_padConnected) {
             continue; // controller owns gameplay input; touch stays menu-only
         }
-        BOOL inMoveZone = ctl_lefty
-            ? (p.x > self.bounds.size.width * (1.0f - MOVE_ZONE_FRAC))
-            : (p.x < self.bounds.size.width * MOVE_ZONE_FRAC);
+        BOOL inMoveZone = [self pointInMoveZone:p];
         if (!_fireTouch && [self point:p inCircle:_fireCircle radius:FIRE_RADIUS * ctl_scale]) {
             _fireTouch = t;
             Q3E_QueueNamedKey("MOUSE1", 1);
@@ -736,6 +928,19 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (_editing) {
+        if (_dragCtl) {
+            CGPoint p = [touches.anyObject locationInView:self];
+            // Only constraint: the centre stays on screen, so anything placed can be
+            // grabbed again. No safe-rect/radius clamp — that proved far too strict
+            // on vkQuake, refusing positions controls already ship at.
+            CGFloat cx = MAX(0, MIN(self.bounds.size.width,  p.x + _dragOffset.width));
+            CGFloat cy = MAX(0, MIN(self.bounds.size.height, p.y + _dragOffset.height));
+            _dragCtl.layer.position = CGPointMake(cx, cy);
+            if (_dragCtl.zoneOnly) _stickBase.position = _stickNub.position = _dragCtl.layer.position;
+        }
+        return;
+    }
     for (UITouch *t in touches) {
         CGPoint p = [t locationInView:self];
         if (t == _moveTouch) {
@@ -877,10 +1082,182 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
 }
 
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (_editing) {
+        // UIKit can deliver a final location in touchesEnded that the last
+        // touchesMoved never carried; without this the control commits a few
+        // points behind where the finger actually let go.
+        if (_dragCtl) {
+            CGPoint p = [touches.anyObject locationInView:self];
+            CGFloat cx = MAX(0, MIN(self.bounds.size.width,  p.x + _dragOffset.width));
+            CGFloat cy = MAX(0, MIN(self.bounds.size.height, p.y + _dragOffset.height));
+            _dragCtl.layer.position = CGPointMake(cx, cy);
+        }
+        [self commitDrag];
+        return;
+    }
     [self endTouches:touches];
 }
 
+- (void)commitDrag {
+    if (!_dragCtl) return;
+    CGSize sz = self.bounds.size;
+    if (sz.width > 0 && sz.height > 0) {
+        CGPoint u = CGPointMake(_dragCtl.layer.position.x / sz.width,
+                                _dragCtl.layer.position.y / sz.height);
+        _dragCtl.unit = u;
+        _dragCtl.hasSaved = YES;
+        NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+        [d setFloat:u.x forKey:q3e_pos_key(_dragCtl.ident, "x")];
+        [d setFloat:u.y forKey:q3e_pos_key(_dragCtl.ident, "y")];
+        [d setBool:YES forKey:DEF_LAYOUT_SET];
+        NSLog(@"Q3E layout: %@ -> (%.3f, %.3f)", _dragCtl.ident, u.x, u.y);
+    }
+    _dragCtl = nil;
+}
+
+// ---- layout editor --------------------------------------------------------
+// Chrome copied from Shipwright (the maintainer's reference UX) and matching vkQuake
+// 1.0.4: reset · live scale slider with a percentage · done, bottom-left. No
+// instruction text — dragging is self-evident once you are in here.
+// x/y are 0..1 of the view. Mirrors what a finger does, via the same methods.
+- (void)fakeTouchAt:(CGPoint)nrm phase:(int)phase {
+    CGSize sz = self.bounds.size;
+    CGPoint p = CGPointMake(nrm.x * sz.width, nrm.y * sz.height);
+    if (phase == 0) {
+        _dragCtl = [self placeableAt:p];
+        if (_dragCtl)
+            _dragOffset = CGSizeMake(_dragCtl.layer.position.x - p.x, _dragCtl.layer.position.y - p.y);
+        NSLog(@"Q3E faketouch down (%.0f,%.0f) grabbed=%@", p.x, p.y, _dragCtl.ident ?: @"none");
+    } else if (phase == 1) {
+        if (!_dragCtl) return;
+        CGFloat cx = MAX(0, MIN(sz.width, p.x + _dragOffset.width));
+        CGFloat cy = MAX(0, MIN(sz.height, p.y + _dragOffset.height));
+        _dragCtl.layer.position = CGPointMake(cx, cy);
+        if (_dragCtl.zoneOnly) _stickBase.position = _stickNub.position = _dragCtl.layer.position;
+    } else if (phase == 3) {
+        // Test seam: force a layout pass mid-drag. This is the exact race that
+        // produced the "duplicate flashing nearby" and the snap-on-release, and
+        // without it the bug cannot be reproduced off-device at all.
+        [self setNeedsLayout];
+        [self layoutIfNeeded];
+        NSLog(@"Q3E faketouch: forced layout pass mid-drag");
+    } else {
+        [self commitDrag];
+    }
+}
+
+// Dump the live layout in the form the defaults table takes, so a layout
+// arranged on glass can be promoted without transcribing numbers by eye.
+- (void)printLayout {
+    CGSize sz = self.bounds.size;
+    Com_Printf("touch layout — scale %.2f\n", ctl_scale);
+    for (Q3EControl *c in _controls) {
+        CGPoint pos = c.layer.position;
+        Com_Printf("  %-7s %s at unit (%.3f, %.3f)\n", c.ident.UTF8String,
+                   c.hasSaved ? "saved " : "default",
+                   sz.width > 0 ? pos.x / sz.width : 0, sz.height > 0 ? pos.y / sz.height : 0);
+    }
+}
+
+- (void)updateScaleLabel { _editPct.text = [NSString stringWithFormat:@"%.0f%%", ctl_scale * 100.0f]; }
+
+- (BOOL)isEditingLayout { return _editing; }
+
+- (void)beginEditingLayout {
+    if (_editing) return;
+    _editing = YES;
+    [self releaseAllTouches];
+    for (Q3EControl *c in _controls) {
+        c.layer.hidden = NO;
+        c.layer.strokeColor = [UIColor colorWithRed:1 green:0.85 blue:0.4 alpha:0.95].CGColor;
+    }
+    _stickZone.hidden = NO;
+    _stickBase.hidden = _stickNub.hidden = NO;   // park the stick inside its zone
+    [self setNeedsLayout];
+
+    UIView *bar = [[UIView alloc] initWithFrame:CGRectZero];
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:bar];
+    _editBar = bar;
+
+    UIButton *(^pill)(NSString *, UIColor *, SEL) = ^UIButton *(NSString *sym, UIColor *bg, SEL act) {
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+        b.backgroundColor = bg;
+        [b setImage:[[UIImage systemImageNamed:sym] imageWithConfiguration:
+                     [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightBold]]
+           forState:UIControlStateNormal];
+        b.tintColor = UIColor.whiteColor;
+        b.layer.cornerRadius = 21;
+        b.translatesAutoresizingMaskIntoConstraints = NO;
+        [b addTarget:self action:act forControlEvents:UIControlEventTouchUpInside];
+        [bar addSubview:b];
+        return b;
+    };
+    UIButton *reset = pill(@"arrow.uturn.backward", [UIColor colorWithRed:0.85 green:0.20 blue:0.22 alpha:0.95], @selector(resetControlPositions));
+    UIButton *done  = pill(@"checkmark", [UIColor colorWithRed:0.18 green:0.78 blue:0.34 alpha:0.95], @selector(endEditingLayout));
+
+    UISlider *sl = [UISlider new];
+    sl.minimumValue = 0.6f; sl.maximumValue = 1.6f; sl.value = ctl_scale;
+    sl.minimumTrackTintColor = [UIColor colorWithWhite:1 alpha:0.9];
+    sl.translatesAutoresizingMaskIntoConstraints = NO;
+    [sl addTarget:self action:@selector(editScaleChanged:) forControlEvents:UIControlEventValueChanged];
+    [bar addSubview:sl];
+    _editSlider = sl;
+
+    UILabel *pct = [UILabel new];
+    pct.font = [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightSemibold];
+    pct.textColor = [UIColor colorWithWhite:1 alpha:0.9];
+    pct.translatesAutoresizingMaskIntoConstraints = NO;
+    [bar addSubview:pct];
+    _editPct = pct;
+    [self updateScaleLabel];
+
+    UILayoutGuide *safe = self.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [bar.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:14],
+        [bar.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-14],
+        [bar.heightAnchor constraintEqualToConstant:42],
+        [bar.trailingAnchor constraintEqualToAnchor:done.trailingAnchor],
+        [reset.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor],
+        [reset.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [reset.widthAnchor constraintEqualToConstant:42],
+        [reset.heightAnchor constraintEqualToConstant:42],
+        [sl.leadingAnchor constraintEqualToAnchor:reset.trailingAnchor constant:16],
+        [sl.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [sl.widthAnchor constraintEqualToConstant:220],
+        [pct.centerXAnchor constraintEqualToAnchor:sl.centerXAnchor],
+        [pct.bottomAnchor constraintEqualToAnchor:sl.topAnchor constant:-2],
+        [done.leadingAnchor constraintEqualToAnchor:sl.trailingAnchor constant:16],
+        [done.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [done.widthAnchor constraintEqualToConstant:42],
+        [done.heightAnchor constraintEqualToConstant:42],
+    ]];
+    NSLog(@"Q3E touch layout editor entered");
+}
+
+- (void)editScaleChanged:(UISlider *)sl {
+    ctl_scale = sl.value;
+    [NSUserDefaults.standardUserDefaults setFloat:sl.value forKey:@"q3e_ctl_scale"];
+    [self applyControlStyle];
+    [self updateScaleLabel];
+}
+
+- (void)endEditingLayout {
+    if (!_editing) return;
+    [self commitDrag];
+    _editing = NO;
+    for (Q3EControl *c in _controls)
+        c.layer.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
+    _stickZone.hidden = YES;
+    _stickBase.hidden = _stickNub.hidden = YES;
+    [_editBar removeFromSuperview];
+    _editBar = nil; _editSlider = nil; _editPct = nil;
+    _menuMode = !_menuMode; [self syncMode];   // force a re-sync of control visibility
+    NSLog(@"Q3E touch layout editor exited");
+}
+
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (_editing) { [self commitDrag]; return; }
     [self endTouches:touches];
 }
 

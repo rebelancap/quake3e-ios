@@ -21,8 +21,39 @@ void Q3E_SetDocumentsPath(const char *path) {
 	Q_strncpyz(q3e_docs, path, sizeof(q3e_docs));
 }
 
+// ---- touch layout editor (ios_input.m) ----
+// Registered as console commands so the editor is reachable from the remote
+// console bridge. Without this the drag path could only ever be exercised by a
+// finger on glass: injected UIKit touches do not reach the touch handlers on a
+// simulator (vkQuake, 2026-07-28).
+void Q3E_Input_BeginLayoutEdit(void);
+void Q3E_Input_ToggleLayoutEdit(void);
+void Q3E_Input_FakeTouch(float nx, float ny, int phase);
+void Q3E_Input_PrintLayout(void);
+
+static void Q3E_TouchEdit_f(void) {
+	if (Cmd_Argc() == 2 && !strcmp(Cmd_Argv(1), "print")) {
+		Q3E_Input_PrintLayout();
+		return;
+	}
+	Q3E_Input_ToggleLayoutEdit();
+}
+
+static void Q3E_FakeTouch_f(void) {
+	const char *ph;
+	int phase;
+	if (Cmd_Argc() != 4) {
+		Com_Printf("q3e_faketouch <x 0..1> <y 0..1> <down|move|up>\n");
+		return;
+	}
+	ph = Cmd_Argv(3);
+	phase = !strcmp(ph, "down") ? 0 : (!strcmp(ph, "move") ? 1 : (!strcmp(ph, "layout") ? 3 : 2));
+	Q3E_Input_FakeTouch((float)atof(Cmd_Argv(1)), (float)atof(Cmd_Argv(2)), phase);
+}
+
 // ---- remote console bridge (ios_console.m) ----
 void Q3E_ConsoleBridge_Start(void);
+int  Q3E_RemoteConsoleEnabled(void);   // ios_settings.m (dev builds only)
 void Q3E_ConsoleBridge_Drain(void);
 void Q3E_ConsoleBridge_Output(const char *text);
 static qboolean q3e_bridge_active = qfalse;
@@ -208,11 +239,17 @@ void Q3E_BootEngine(void) {
 	Sys_Print("Q3E-SPIKE cmdline: ");
 	Sys_Print(cmdline);
 	Sys_Print("\n");
-	if (getenv("Q3E_CONSOLE")) {
+	// Two ways in: the env var (desktop/devicectl path, needs a cable) and the
+	// dev-build-only Settings switch — which exists because device services do
+	// NOT traverse a tailnet, so an OTA-installed app tapped from the home screen
+	// could never open the port however reachable the device was.
+	if (getenv("Q3E_CONSOLE") || Q3E_RemoteConsoleEnabled()) {
 		q3e_bridge_active = qtrue;
 		Q3E_ConsoleBridge_Start();
 	}
 	Com_Init(cmdline);
+	Cmd_AddCommand("touchedit", Q3E_TouchEdit_f);
+	Cmd_AddCommand("q3e_faketouch", Q3E_FakeTouch_f);
 	q3e_booted = qtrue;
 	if (q3e_migration_level() < Q3E_MIGRATION_LEVEL) {
 		q3e_set_migration_level(Q3E_MIGRATION_LEVEL);

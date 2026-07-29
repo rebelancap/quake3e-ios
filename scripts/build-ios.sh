@@ -112,6 +112,7 @@ APP="$ROOT/build/ios/xcode/Release-iphoneos/Quake3e.app"
 rm -f "$APP/Quake3e"
 xcodebuild -project "$SPIKE/Quake3e.xcodeproj" -target Quake3e -configuration Release \
   -sdk iphoneos -allowProvisioningUpdates ONLY_ACTIVE_ARCH=NO \
+  ${Q3E_DEV_DEFS:+GCC_PREPROCESSOR_DEFINITIONS="$Q3E_DEV_DEFS"} \
   SYMROOT="$ROOT/build/ios/xcode" build > "$ROOT/build/ios/xcodebuild.log" 2>&1 \
   || { echo "FATAL: xcodebuild failed — tail:"; tail -30 "$ROOT/build/ios/xcodebuild.log"; exit 1; }
 

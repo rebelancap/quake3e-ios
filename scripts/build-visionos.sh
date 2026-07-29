@@ -101,6 +101,7 @@ APPOUT="$ROOT/build/visionos/xcode/Release-xros/Quake3e.app"
 rm -f "$APPOUT/Quake3e"
 xcodebuild -project "$APP/Quake3e.xcodeproj" -target Quake3e-visionOS -configuration Release \
   -sdk xros -allowProvisioningUpdates ONLY_ACTIVE_ARCH=NO \
+  ${Q3E_DEV_DEFS:+GCC_PREPROCESSOR_DEFINITIONS="$Q3E_DEV_DEFS"} \
   SYMROOT="$ROOT/build/visionos/xcode" build > "$ROOT/build/visionos/xcodebuild.log" 2>&1 \
   || { echo "FATAL: xcodebuild failed — tail:"; tail -30 "$ROOT/build/visionos/xcodebuild.log"; exit 1; }
 

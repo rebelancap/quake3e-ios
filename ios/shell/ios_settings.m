@@ -12,7 +12,9 @@
 // appliers (ios_input.m / AppShell.m)
 void Q3E_Input_SetGyro(int enabled, float scale);
 void Q3E_Input_SetTouchSens(float sx, float sy);
-void Q3E_Input_SetControlStyle(float scale, float alpha, int lefty);
+void Q3E_Input_SetControlStyle(float scale, float alpha);
+void Q3E_ConsoleBridge_Start(void);
+void Q3E_Input_BeginLayoutEdit(void);
 void Q3E_Shell_SetRefreshMode(int mode60);  // 0 = native/120, 1 = 60
 void Q3E_Shell_SetFPSCounter(int enabled);
 void Q3E_Input_SetFireHaptics(int on);       // haptic tap on fire (ios_input.m)
@@ -37,6 +39,18 @@ void  Q3E_Set3DBrightness(float gamma);      // 3D panel brightness (Q3EImmersiv
 #define DEF_LEFTY       @"q3e_lefty"
 #define DEF_REFRESH_60  @"q3e_refresh_60"
 #define DEF_FPS_COUNTER @"q3e_fps_counter"
+#define DEF_REMOTE_CONSOLE @"q3e_remoteConsole"
+
+// Read at boot by ios_glue.c. DEV BUILDS ONLY — a public release must never ship
+// a way to open an unauthenticated engine command port from the UI. The gate is
+// derived from the version scheme in publish-ota.sh, not set by hand.
+int Q3E_RemoteConsoleEnabled(void) {
+#ifdef Q3E_DEV_BUILD
+    return [NSUserDefaults.standardUserDefaults boolForKey:DEF_REMOTE_CONSOLE] ? 1 : 0;
+#else
+    return 0;
+#endif
+}
 #define DEF_INVERT      @"q3e_invert_look"
 #define DEF_FIRE_HAPTIC @"q3e_fire_haptic"
 #define DEF_SND_VOL     @"q3e_snd_vol"
@@ -107,8 +121,7 @@ void Q3E_Settings_ApplyAll(void) {
     Q3E_Input_SetTouchSens(def_float(DEF_SENS_X, legacy) * Q3E_SENS_APPLY,
                            def_float(DEF_SENS_Y, legacy) * Q3E_SENS_APPLY);
     Q3E_Input_SetControlStyle(def_float(DEF_CTL_SCALE, 1.0f),
-                              def_float(DEF_CTL_ALPHA, 1.0f),
-                              [d boolForKey:DEF_LEFTY]);
+                              def_float(DEF_CTL_ALPHA, 1.0f));
     Q3E_Shell_SetRefreshMode([d boolForKey:DEF_REFRESH_60]);
     Q3E_Shell_SetFPSCounter([d boolForKey:DEF_FPS_COUNTER]);
 
@@ -155,7 +168,10 @@ void Q3E_Settings_ApplyAll(void) {
 }
 
 @implementation Q3ESettingsController {
-    UISwitch *_gyroSwitch, *_fpsSwitch, *_leftySwitch;
+    UISwitch *_gyroSwitch, *_fpsSwitch;
+#ifdef Q3E_DEV_BUILD
+    UISwitch *_remoteConsoleSwitch;
+#endif
     UISwitch *_invertSwitch, *_alwaysRunSwitch, *_autoSwitchSwitch, *_simpleItemsSwitch, *_fireHapticSwitch;
     UISegmentedControl *_refreshSeg, *_msaaSeg;
     UISlider *_gyroSlider, *_sensXSlider, *_sensYSlider, *_sizeSlider, *_alphaSlider;
@@ -201,7 +217,6 @@ void Q3E_Settings_ApplyAll(void) {
     _sizeValue = [self label:@"" size:14 bold:NO];
     _alphaSlider = [self makeSlider:0.4 max:1.6 value:def_float(DEF_CTL_ALPHA, 1.0f)];
     _alphaValue = [self label:@"" size:14 bold:NO];
-    _leftySwitch = [self makeSwitch:[d boolForKey:DEF_LEFTY]];
 #if TARGET_OS_VISION
     // No number: UIScreen (and the panel's max rate) isn't queryable on visionOS,
     // and hardcoding one misled — M5 Vision Pro runs 120 Hz, earlier panels 90.
@@ -310,13 +325,29 @@ void Q3E_Settings_ApplyAll(void) {
     [rows addArrangedSubview:[self row:@[[self label:@"Controls size" size:16 bold:NO], _sizeSlider, _sizeValue]]];
     [rows addArrangedSubview:[self row:@[[self label:@"Controls opacity" size:16 bold:NO], _alphaSlider, _alphaValue]]];
     [rows addArrangedSubview:[self row:@[[self label:@"Fire haptics" size:16 bold:NO], _fireHapticSwitch]]];
-    [rows addArrangedSubview:[self row:@[[self label:@"Left-handed layout" size:16 bold:NO], _leftySwitch]]];
+    // Replaces "Left-handed layout": the move stick's zone is draggable now, so
+    // stick-on-the-right is one drag — and so is every position in between.
+    UIButton *layoutBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [layoutBtn setTitle:@"Customize Touch Layout…" forState:UIControlStateNormal];
+    layoutBtn.titleLabel.font = [UIFont systemFontOfSize:16];
+    [layoutBtn setTitleColor:[UIColor colorWithRed:0.4 green:0.8 blue:1.0 alpha:1] forState:UIControlStateNormal];
+    layoutBtn.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    [layoutBtn addTarget:self action:@selector(openLayoutEditor) forControlEvents:UIControlEventTouchUpInside];
+    [rows addArrangedSubview:[self row:@[layoutBtn]]];
 
     [rows addArrangedSubview:[self section:@"GAMEPLAY"]];
     [rows addArrangedSubview:[self row:@[[self label:@"Always run" size:16 bold:NO], _alwaysRunSwitch]]];
     [rows addArrangedSubview:[self row:@[[self label:@"Auto-switch weapons" size:16 bold:NO], _autoSwitchSwitch]]];
     [rows addArrangedSubview:[self row:@[[self label:@"Simple items" size:16 bold:NO], _simpleItemsSwitch]]];
     [rows addArrangedSubview:[self row:@[[self label:@"FPS counter" size:16 bold:NO], _fpsSwitch]]];
+#ifdef Q3E_DEV_BUILD
+    // DEV BUILDS ONLY — compiled out of anything with a public version number.
+    // Opens the engine console on TCP 27999 to the local network and tailnet,
+    // unauthenticated, so it must never ship publicly.
+    _remoteConsoleSwitch = [self makeSwitch:[d boolForKey:DEF_REMOTE_CONSOLE]];
+    [rows addArrangedSubview:[self row:@[[self label:@"Remote Console (port 27999)" size:16 bold:NO],
+                                         _remoteConsoleSwitch]]];
+#endif
 
 
     UIScrollView *scroll = [[UIScrollView alloc] init];
@@ -410,9 +441,14 @@ void Q3E_Settings_ApplyAll(void) {
     [d setFloat:_sensYSlider.value forKey:DEF_SENS_Y];
     [d setFloat:_sizeSlider.value forKey:DEF_CTL_SCALE];
     [d setFloat:_alphaSlider.value forKey:DEF_CTL_ALPHA];
-    [d setBool:_leftySwitch.on forKey:DEF_LEFTY];
     [d setBool:(_refreshSeg.selectedSegmentIndex == 0) forKey:DEF_REFRESH_60];
     [d setBool:_fpsSwitch.on forKey:DEF_FPS_COUNTER];
+#ifdef Q3E_DEV_BUILD
+    [d setBool:_remoteConsoleSwitch.on forKey:DEF_REMOTE_CONSOLE];
+    // Start it the moment it is switched on, so it needs no relaunch. Switching
+    // off takes effect next launch (the listener is not torn down mid-session).
+    if (_remoteConsoleSwitch.on) Q3E_ConsoleBridge_Start();
+#endif
     [d setBool:_invertSwitch.on forKey:DEF_INVERT];
     [d setFloat:_fovSlider.value forKey:DEF_FOV];
     [d setFloat:_brightSlider.value forKey:DEF_BRIGHTNESS];
@@ -462,6 +498,13 @@ void Q3E_Settings_ApplyAll(void) {
 - (void)msaaChanged {
     [self changed];
     Q3E_QueueCommand("vid_restart");
+}
+
+// Close the sheet first — it covers the screen you are about to arrange.
+- (void)openLayoutEditor {
+    [self dismissViewControllerAnimated:YES completion:^{
+        Q3E_Input_BeginLayoutEdit();
+    }];
 }
 
 - (void)dismissSelf {

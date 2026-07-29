@@ -89,6 +89,11 @@ static void accept_client(void) {
 }
 
 void Q3E_ConsoleBridge_Start(void) {
+    // Idempotent: the settings switch can call this mid-session, and boot may
+    // already have started it from the env var.
+    static BOOL started = NO;
+    if (started) return;
+    started = YES;
     bridge_queue = dispatch_queue_create("q3e.console.bridge", DISPATCH_QUEUE_SERIAL);
     cmd_lock = [NSLock new];
     cmd_queue = [NSMutableArray array];
