@@ -6,7 +6,6 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Foundation/Foundation.h>
-#import <AVFoundation/AVFoundation.h>
 
 #define VK_USE_PLATFORM_METAL_EXT 1
 #define VK_NO_PROTOTYPES 1
@@ -17,69 +16,9 @@ extern PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char 
 
 CAMetalLayer *q3e_layer = NULL;
 
-// AudioQueue control lives in ios_snd.c (pure C).
-extern void Q3E_SND_Pause(void);
-extern void Q3E_SND_Resume(void);
-
-static void q3e_reactivate_session(void) {
-    NSError *err = nil;
-    if (![AVAudioSession.sharedInstance setActive:YES error:&err]) {
-        NSLog(@"Q3E: audio reactivate error: %@", err);
-    }
-}
-
-void Q3E_ActivateAudioSession(void) {
-    AVAudioSession *session = AVAudioSession.sharedInstance;
-    NSError *err = nil;
-
-    // Ambient (the old default) is silenced by the hardware Ring/Silent
-    // switch — a game played with the ringer off would be mute, the
-    // single most likely field report. .playback ignores the mute switch;
-    // .mixWithOthers keeps the user's own Music/podcast audio alive
-    // underneath the game. No UIBackgroundModes=audio, so iOS still
-    // deactivates us on background (scene-resign already pauses audio).
-    if (![session setCategory:AVAudioSessionCategoryPlayback
-                  withOptions:AVAudioSessionCategoryOptionMixWithOthers
-                        error:&err]) {
-        NSLog(@"Q3E: audio category error: %@", err);
-    }
-    if (![session setActive:YES error:&err]) {
-        NSLog(@"Q3E: audio activate error: %@", err);
-    }
-
-    static BOOL observing = NO;
-    if (observing) return;
-    observing = YES;
-
-    // A phone call / Siri / alarm interrupts and stops the AudioQueue; the
-    // engine keeps mixing into a stalled queue and the game is silent
-    // forever after. Pause on Began; reactivate the session and restart
-    // the queue on Ended (D-007's still-open interruption item).
-    [NSNotificationCenter.defaultCenter addObserverForName:AVAudioSessionInterruptionNotification
-        object:session queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
-        NSInteger type = [n.userInfo[AVAudioSessionInterruptionTypeKey] integerValue];
-        if (type == AVAudioSessionInterruptionTypeBegan) {
-            Q3E_SND_Pause();
-            NSLog(@"Q3E: audio interruption began — queue paused");
-        } else if (type == AVAudioSessionInterruptionTypeEnded) {
-            q3e_reactivate_session();
-            Q3E_SND_Resume();
-            NSLog(@"Q3E: audio interruption ended — session reactivated, queue resumed");
-        }
-    }];
-
-    // Route change (headphones/BT unplug, dock): the AudioQueue follows the
-    // new route automatically; re-assert the session so a system
-    // deactivation on the transition can't leave us silently muted.
-    [NSNotificationCenter.defaultCenter addObserverForName:AVAudioSessionRouteChangeNotification
-        object:session queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
-        NSInteger reason = [n.userInfo[AVAudioSessionRouteChangeReasonKey] integerValue];
-        if (reason == AVAudioSessionRouteChangeReasonOldDeviceUnavailable) {
-            q3e_reactivate_session();
-        }
-        NSLog(@"Q3E: audio route change (reason %ld)", (long)reason);
-    }];
-}
+// AVAudioSession policy, the interruption/route observers and the master mix
+// gain all moved to ios_audio.m when the Audio settings section landed — the
+// session's category is now a user choice, so it needs somewhere of its own.
 
 int Q3E_LayerWidth(void)  { return (int)q3e_layer.drawableSize.width; }
 int Q3E_LayerHeight(void) { return (int)q3e_layer.drawableSize.height; }

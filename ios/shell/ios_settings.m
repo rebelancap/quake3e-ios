@@ -8,6 +8,7 @@
 
 #import <UIKit/UIKit.h>
 #import "ios_settings.h"
+#import "ios_audio.h"
 
 // appliers (ios_input.m / AppShell.m)
 void Q3E_Input_SetGyro(int enabled, float scale);
@@ -107,6 +108,14 @@ static float def_float(NSString *key, float fallback) {
     return v ? v.floatValue : fallback;
 }
 
+// Current "other app audio" mode, clamped — shared by the picker and the summary
+// on the row that opens it. The policy itself lives in ios_audio.m.
+static int q3e_audio_mode_setting(void) {
+    int m = (int)lroundf(def_float(Q3E_DEF_AUDIO_MODE, (float)Q3E_AUDIO_DUCK_OTHERS));
+    if (m < 0 || m >= Q3E_AUDIO_MODE_COUNT) m = Q3E_AUDIO_DUCK_OTHERS;
+    return m;
+}
+
 static void apply_cvar_f(const char *name, float v) {
     char cmd[96]; snprintf(cmd, sizeof(cmd), "%s %g", name, v); Q3E_QueueCommand(cmd);
 }
@@ -136,6 +145,10 @@ void Q3E_Settings_ApplyAll(void) {
     Q3E_Input_SetFireHaptics([d boolForKey:DEF_FIRE_HAPTIC]);
     apply_cvar_f("s_volume", def_float(DEF_SND_VOL, 0.8f));
     apply_cvar_f("s_musicvolume", def_float(DEF_MUS_VOL, 0.8f));
+    // Session category/options + the master gain target (the gain itself ramps
+    // in Q3E_Audio_Tick). Safe before the engine has booted: no queue yet just
+    // means the gain lands when SNDDMA_Init creates it.
+    Q3E_Audio_Apply();
     apply_cvar_f("cg_crosshairSize", def_float(DEF_XHAIR_SIZE, 24.0f));
     apply_cvar_f("cg_drawCrosshair", def_float(DEF_XHAIR_STYLE, 1.0f));
     // r_ext_multisample is latched (needs vid_restart to take effect — the segmented
@@ -167,6 +180,51 @@ void Q3E_Settings_ApplyAll(void) {
 #endif
 }
 
+// One-of-N picker for the "Other app audio" row. Each option carries a sentence
+// saying what it actually does — the whole point of the Audio section is that
+// "duck" and "mix" mean nothing to a player, and a four-word label wouldn't help.
+// Presented modally (this sheet has no navigation controller of its own).
+@interface Q3EAudioModeController : UITableViewController
+@property (nonatomic, copy) void (^onPick)(void);
+@end
+
+@implementation Q3EAudioModeController
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Other App Audio";
+    self.tableView.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1.0];
+    self.navigationItem.rightBarButtonItem =
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                                                      target:self action:@selector(dismissSelf)];
+}
+- (void)dismissSelf { [self dismissViewControllerAnimated:YES completion:nil]; }
+- (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s {
+    return Q3E_AudioModeTitles().count;
+}
+- (UITableViewCell *)tableView:(UITableView *)t cellForRowAtIndexPath:(NSIndexPath *)ip {
+    UITableViewCell *c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+    c.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1.0];
+    c.textLabel.text = Q3E_AudioModeTitles()[ip.row];
+    c.textLabel.textColor = UIColor.whiteColor;
+    c.detailTextLabel.text = Q3E_AudioModeDetails()[ip.row];
+    c.detailTextLabel.textColor = [UIColor colorWithWhite:0.68 alpha:1.0];
+    c.detailTextLabel.numberOfLines = 0; // let the explanation wrap rather than truncate
+    c.accessoryType = (ip.row == q3e_audio_mode_setting()) ? UITableViewCellAccessoryCheckmark
+                                                           : UITableViewCellAccessoryNone;
+    c.tintColor = [UIColor colorWithRed:1.0 green:0.85 blue:0.2 alpha:1.0];
+    return c;
+}
+- (void)tableView:(UITableView *)t didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [t deselectRowAtIndexPath:ip animated:YES];
+    [NSUserDefaults.standardUserDefaults setFloat:(float)ip.row forKey:Q3E_DEF_AUDIO_MODE];
+    [t reloadData];
+    if (self.onPick) self.onPick();
+    // Let the checkmark land before backing out, so the choice is visibly taken.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ [self dismissSelf]; });
+}
+@end
+
 @implementation Q3ESettingsController {
     UISwitch *_gyroSwitch, *_fpsSwitch;
 #ifdef Q3E_DEV_BUILD
@@ -178,6 +236,9 @@ void Q3E_Settings_ApplyAll(void) {
     UISlider *_fovSlider, *_brightSlider, *_sndVolSlider, *_musVolSlider, *_xhairSizeSlider, *_xhairStyleSlider;
     UILabel *_gyroValue, *_sensXValue, *_sensYValue, *_sizeValue, *_alphaValue;
     UILabel *_fovValue, *_brightValue, *_sndVolValue, *_musVolValue, *_xhairSizeValue, *_xhairStyleValue;
+    UISlider *_masterVolSlider;
+    UILabel *_masterVolValue;
+    UIButton *_audioModeButton;
 #if TARGET_OS_VISION
     UISwitch *_hideGunSwitch, *_hideHeadSwitch;
     UISlider *_depthSlider, *_distSlider, *_size3DSlider, *_height3DSlider;
@@ -213,7 +274,10 @@ void Q3E_Settings_ApplyAll(void) {
     _sensXValue = [self label:@"" size:14 bold:NO];
     _sensYSlider = [self makeSlider:0.5 max:10.0 value:def_float(DEF_SENS_Y, legacy)];
     _sensYValue = [self label:@"" size:14 bold:NO];
-    _sizeSlider = [self makeSlider:0.7 max:1.5 value:def_float(DEF_CTL_SCALE, 1.0f)];
+    // Same 0.6–1.6 range as the layout editor's own slider (ios_input.m
+    // CTL_SCALE_MIN/MAX) — two sliders driving one value must not disagree
+    // about its limits, or the editor can set a size this sheet cannot show.
+    _sizeSlider = [self makeSlider:0.6 max:1.6 value:def_float(DEF_CTL_SCALE, 1.0f)];
     _sizeValue = [self label:@"" size:14 bold:NO];
     _alphaSlider = [self makeSlider:0.4 max:1.6 value:def_float(DEF_CTL_ALPHA, 1.0f)];
     _alphaValue = [self label:@"" size:14 bold:NO];
@@ -244,6 +308,15 @@ void Q3E_Settings_ApplyAll(void) {
     _sndVolValue = [self label:@"" size:14 bold:NO];
     _musVolSlider = [self makeSlider:0.0 max:1.0 value:def_float(DEF_MUS_VOL, 0.8f)];
     _musVolValue = [self label:@"" size:14 bold:NO];
+    // Master gain: sits ON TOP of the two engine cvars above (it is the
+    // AudioQueue's own volume, not a cvar), so it can never be written into
+    // config.cfg and can never fight the engine's own Sound Volume menu.
+    _masterVolSlider = [self makeSlider:0.0 max:1.0 value:def_float(Q3E_DEF_MASTER_VOL, 1.0f)];
+    _masterVolValue = [self label:@"" size:14 bold:NO];
+    _audioModeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _audioModeButton.titleLabel.font = [UIFont systemFontOfSize:16];
+    [_audioModeButton setTitleColor:[UIColor colorWithRed:0.4 green:0.8 blue:1.0 alpha:1] forState:UIControlStateNormal];
+    [_audioModeButton addTarget:self action:@selector(openAudioModePicker) forControlEvents:UIControlEventTouchUpInside];
     _xhairSizeSlider = [self makeSlider:8 max:48 value:def_float(DEF_XHAIR_SIZE, 24.0f)];
     _xhairSizeValue = [self label:@"" size:14 bold:NO];
     _xhairStyleSlider = [self makeSlider:1 max:10 value:def_float(DEF_XHAIR_STYLE, 1.0f)];
@@ -318,8 +391,10 @@ void Q3E_Settings_ApplyAll(void) {
     [rows addArrangedSubview:[self row:@[[self label:@"Crosshair style" size:16 bold:NO], _xhairStyleSlider, _xhairStyleValue]]];
 
     [rows addArrangedSubview:[self section:@"AUDIO"]];
+    [rows addArrangedSubview:[self row:@[[self label:@"Master volume" size:16 bold:NO], _masterVolSlider, _masterVolValue]]];
     [rows addArrangedSubview:[self row:@[[self label:@"Sound volume" size:16 bold:NO], _sndVolSlider, _sndVolValue]]];
     [rows addArrangedSubview:[self row:@[[self label:@"Music volume" size:16 bold:NO], _musVolSlider, _musVolValue]]];
+    [rows addArrangedSubview:[self row:@[[self label:@"Other app audio" size:16 bold:NO], _audioModeButton]]];
 
     [rows addArrangedSubview:[self section:@"TOUCH CONTROLS"]];
     [rows addArrangedSubview:[self row:@[[self label:@"Controls size" size:16 bold:NO], _sizeSlider, _sizeValue]]];
@@ -416,6 +491,8 @@ void Q3E_Settings_ApplyAll(void) {
     _brightValue.text = [NSString stringWithFormat:@"%.1f", _brightSlider.value];
     _sndVolValue.text = [NSString stringWithFormat:@"%.0f%%", _sndVolSlider.value * 100];
     _musVolValue.text = [NSString stringWithFormat:@"%.0f%%", _musVolSlider.value * 100];
+    _masterVolValue.text = [NSString stringWithFormat:@"%.0f%%", _masterVolSlider.value * 100];
+    [_audioModeButton setTitle:Q3E_AudioModeTitles()[q3e_audio_mode_setting()] forState:UIControlStateNormal];
     _xhairSizeValue.text = [NSString stringWithFormat:@"%.0f", _xhairSizeSlider.value];
     _xhairStyleValue.text = [NSString stringWithFormat:@"%.0f", roundf(_xhairStyleSlider.value)];
 #if TARGET_OS_VISION
@@ -458,6 +535,7 @@ void Q3E_Settings_ApplyAll(void) {
     [d setBool:_fireHapticSwitch.on forKey:DEF_FIRE_HAPTIC];
     [d setFloat:_sndVolSlider.value forKey:DEF_SND_VOL];
     [d setFloat:_musVolSlider.value forKey:DEF_MUS_VOL];
+    [d setFloat:_masterVolSlider.value forKey:Q3E_DEF_MASTER_VOL];
     [d setFloat:_xhairSizeSlider.value forKey:DEF_XHAIR_SIZE];
     [d setFloat:roundf(_xhairStyleSlider.value) forKey:DEF_XHAIR_STYLE];
     { const int msaaVals[] = {0, 2, 4, 8};
@@ -498,6 +576,20 @@ void Q3E_Settings_ApplyAll(void) {
 - (void)msaaChanged {
     [self changed];
     Q3E_QueueCommand("vid_restart");
+}
+
+// "Other app audio" — a one-of-N list with a sentence per option. This sheet is
+// presented bare (no navigation controller), so wrap and present rather than push.
+- (void)openAudioModePicker {
+    Q3EAudioModeController *pick =
+        [[Q3EAudioModeController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    __weak Q3ESettingsController *weakSelf = self;
+    pick.onPick = ^{
+        Q3E_Audio_Apply();
+        [weakSelf refreshValueLabels];  // update the summary on the row that opened this
+    };
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:pick];
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 // Close the sheet first — it covers the screen you are about to arrange.

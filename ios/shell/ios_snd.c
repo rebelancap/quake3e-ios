@@ -9,7 +9,7 @@
 #include <AudioToolbox/AudioToolbox.h>
 #include <pthread.h>
 
-void Q3E_ActivateAudioSession(void); // ios_metal.m (AVAudioSession is ObjC)
+void Q3E_ActivateAudioSession(void); // ios_audio.m (AVAudioSession is ObjC)
 
 #define Q3E_AQ_BUFFERS 3
 #define Q3E_AQ_FRAMES  1024
@@ -19,6 +19,23 @@ static AudioQueueBufferRef q3e_bufs[Q3E_AQ_BUFFERS];
 static pthread_mutex_t q3e_snd_mutex = PTHREAD_MUTEX_INITIALIZER;
 static unsigned int q3e_readpos; // bytes consumed from the ring, monotonic
 static qboolean q3e_snd_active = qfalse;
+static float q3e_snd_gain = 1.0f; // master gain (ios_audio.m); NOT a cvar — see below
+
+// The iOS master gain: "Master volume" and the two "lower/mute game audio" modes
+// both land here. Deliberately the AudioQueue's own volume parameter rather than
+// s_volume: s_volume is CVAR_ARCHIVE, so a ducked value would be written to
+// config.cfg on resign-active and become the next launch's base volume — a
+// ratchet that walks the player's real volume down over days. The queue
+// parameter sits downstream of the entire mixer (sfx, music, cinematics) and is
+// persisted nowhere, so the engine's own volume cvars are never touched.
+void Q3E_SND_SetGain(float g) {
+	if (g < 0.0f) g = 0.0f;
+	if (g > 1.0f) g = 1.0f;
+	q3e_snd_gain = g;
+	if (q3e_snd_active) {
+		AudioQueueSetParameter(q3e_queue, kAudioQueueParam_Volume, g);
+	}
+}
 
 static void q3e_aq_callback(void *userData, AudioQueueRef aq, AudioQueueBufferRef buf) {
 	const unsigned int ringBytes = dma.samples * (dma.samplebits / 8);
@@ -101,7 +118,9 @@ qboolean SNDDMA_Init(void) {
 		AudioQueueEnqueueBuffer(q3e_queue, q3e_bufs[i], 0, NULL);
 	}
 
-	AudioQueueSetParameter(q3e_queue, kAudioQueueParam_Volume, 1.0f);
+	// Carry the live gain across a snd_restart / s_khz change rather than
+	// resetting to full — a restart while ducked would blast the podcast listener.
+	AudioQueueSetParameter(q3e_queue, kAudioQueueParam_Volume, q3e_snd_gain);
 	q3e_readpos = 0;
 
 	err = AudioQueueStart(q3e_queue, NULL);

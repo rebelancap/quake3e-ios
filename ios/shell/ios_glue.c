@@ -77,6 +77,7 @@ void q3e_console_command(const char *text) {
 // ---- input shims (called from ios_input.m) ----
 
 void Q3E_Input_Frame(void); // ios_input.m
+void Q3E_Audio_Tick(void);  // ios_audio.m — ramps the master gain (float math only)
 
 void Q3E_QueueMouse(int dx, int dy) {
 	Sys_QueEvent(0, SE_MOUSE, dx, dy, 0, NULL);
@@ -361,6 +362,7 @@ void Q3E_Frame(void) {
 		Q3E_ConsoleBridge_Drain();
 	}
 	Q3E_Input_Frame();
+	Q3E_Audio_Tick();
 	Com_Frame(qtrue); // noDelay: the CADisplayLink is the only pacer
 
 	const int64_t end = Sys_Microseconds();

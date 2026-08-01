@@ -71,6 +71,12 @@ void Q3E_PresentSettings(UIView *fromView); // ios_settings.m
 // far less often and does not need jump's target size.
 #define CROUCH_RADIUS    30.0f
 #define STICK_ZONE_R    150.0f   // move-stick activation zone (editor-draggable)
+#define MENU_BTN_RADIUS  24.0f   // ≡ and ⚙
+#define MENU_BTN_HIT     34.0f   // ...with a deliberately larger touch target
+// Top of the size slider, in both the settings sheet and the layout editor. Also
+// the resolution SF Symbol glyphs are rasterized at, so they stay sharp there.
+#define CTL_SCALE_MAX     1.6f
+#define CTL_SCALE_MIN     0.6f
 
 // A placeable on-screen control. Position is stored as a UNIT fraction of the
 // view once the player has customised it; until then the shipped default block
@@ -432,8 +438,16 @@ void Q3E_Input_SetFireHaptics(int on) {
 #endif
 }
 
+// Clamped at every entry point. The scale is now a divisor (lineWidth = 2/k) and
+// a transform factor, so a zero — from a corrupt default, or an older build's
+// value — would mean invisible AND untappable controls with no way back.
+static float q3e_clamp_scale(float s) {
+    if (!(s > 0.0f)) return 1.0f;   // catches 0 and NaN
+    return s < CTL_SCALE_MIN ? CTL_SCALE_MIN : (s > CTL_SCALE_MAX ? CTL_SCALE_MAX : s);
+}
+
 void Q3E_Input_SetControlStyle(float scale, float alpha) {
-    ctl_scale = scale;
+    ctl_scale = q3e_clamp_scale(scale);
     ctl_alpha = alpha;
     [NSNotificationCenter.defaultCenter postNotificationName:@"Q3EControlStyleChanged" object:nil];
 }
@@ -581,11 +595,11 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
         _wprevCircle = [self circleLayer:WPN_RADIUS alpha:0.16];
         _crouchCircle = [self circleLayer:CROUCH_RADIUS alpha:0.18];
         // ≡ (top-right) = ESC / "Start". Bigger glyph, centered to fill the button.
-        _menuButton = [self circleLayer:24.0f alpha:0.16];
-        [self addGlyph:@"≡" toLayer:_menuButton radius:24.0f size:37 dx:0 dy:-3];
+        _menuButton = [self circleLayer:MENU_BTN_RADIUS alpha:0.16];
+        [self addGlyph:@"≡" toLayer:_menuButton radius:MENU_BTN_RADIUS size:37 dx:0 dy:-3];
         // ⚙ (top-left) = open the iOS settings sheet. Shown only while a menu is up (any
         // input); replaces the old, easily-forgotten long-press on ≡.
-        _gearButton = [self circleLayer:24.0f alpha:0.16];
+        _gearButton = [self circleLayer:MENU_BTN_RADIUS alpha:0.16];
         [self addSymbol:@"gearshape.fill" toLayer:_gearButton size:24];
         _gearButton.hidden = YES;
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(keyboardWillShow:)
@@ -610,8 +624,12 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
 
         [self buildControlRegistry];
         q3e_input_view = self;
-        ctl_scale = [NSUserDefaults.standardUserDefaults objectForKey:@"q3e_ctl_scale"]
-                        ? [NSUserDefaults.standardUserDefaults floatForKey:@"q3e_ctl_scale"] : ctl_scale;
+        ctl_scale = q3e_clamp_scale([NSUserDefaults.standardUserDefaults objectForKey:@"q3e_ctl_scale"]
+                        ? [NSUserDefaults.standardUserDefaults floatForKey:@"q3e_ctl_scale"] : ctl_scale);
+        // Size the layers from the saved scale right here rather than relying on
+        // Q3E_Settings_ApplyAll's notification arriving after this view exists —
+        // the controls must never be drawn at 100% while hit-tested at ctl_scale.
+        [self applyControlStyle];
         if (getenv("Q3E_TOUCHEDIT")) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ [self beginEditingLayout]; });
@@ -655,7 +673,10 @@ static void q3e_no_implicit_actions(CALayer *l) {
     t.alignmentMode = kCAAlignmentCenter;
     t.foregroundColor = [UIColor colorWithWhite:1.0 alpha:0.55].CGColor;
     t.frame = CGRectMake(-r, -size * 0.6f, 2 * r, size * 1.33f);
-    t.contentsScale = self.traitCollection.displayScale ?: 2.0; // UIScreen n/a on visionOS
+    // Rendered at the TOP of the size slider's range: the button is scaled by a
+    // layer transform, so text rasterized at 1x would be resampled up and blur at
+    // 160%. (UIScreen is unavailable on visionOS — hence the traitCollection.)
+    t.contentsScale = (self.traitCollection.displayScale ?: 2.0) * CTL_SCALE_MAX;
     q3e_no_implicit_actions(t);
     [layer addSublayer:t];
 }
@@ -670,7 +691,7 @@ static void q3e_no_implicit_actions(CALayer *l) {
     t.alignmentMode = kCAAlignmentCenter;
     t.foregroundColor = [UIColor colorWithWhite:1.0 alpha:0.72].CGColor;
     t.frame = CGRectMake(-r + dx, -size * 0.6f + dy, 2 * r, size * 1.33f);
-    t.contentsScale = self.traitCollection.displayScale ?: 2.0;
+    t.contentsScale = (self.traitCollection.displayScale ?: 2.0) * CTL_SCALE_MAX;
     q3e_no_implicit_actions(t);
     [layer addSublayer:t];
 }
@@ -690,8 +711,13 @@ static void q3e_no_implicit_actions(CALayer *l) {
 }
 
 - (void)addSymbol:(NSString *)name toLayer:(CALayer *)layer size:(CGFloat)pt {
+    // Rasterized at the TOP of the size slider's range and displayed at nominal
+    // size (resizeAspect does the fit): the whole button is scaled by a layer
+    // transform, so a glyph rendered at 100% would be resampled up to 160% and go
+    // soft exactly where someone who enlarged the controls is looking hardest.
     UIImageSymbolConfiguration *cfg =
-        [UIImageSymbolConfiguration configurationWithPointSize:pt weight:UIImageSymbolWeightRegular];
+        [UIImageSymbolConfiguration configurationWithPointSize:pt * CTL_SCALE_MAX
+                                                        weight:UIImageSymbolWeightRegular];
     UIImage *sym = [[UIImage systemImageNamed:name withConfiguration:cfg]
                     imageWithTintColor:[UIColor colorWithWhite:1.0 alpha:0.9]
                     renderingMode:UIImageRenderingModeAlwaysOriginal];
@@ -702,28 +728,45 @@ static void q3e_no_implicit_actions(CALayer *l) {
     UIImage *flat = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
         [sym drawInRect:CGRectMake(0, 0, sym.size.width, sym.size.height)];
     }];
+    CGSize nominal = CGSizeMake(sym.size.width / CTL_SCALE_MAX, sym.size.height / CTL_SCALE_MAX);
     CALayer *l = [CALayer layer];
     l.contents = (id)flat.CGImage;
     l.contentsGravity = kCAGravityResizeAspect;
-    l.frame = CGRectMake(-sym.size.width / 2, -sym.size.height / 2, sym.size.width, sym.size.height);
+    l.frame = CGRectMake(-nominal.width / 2, -nominal.height / 2, nominal.width, nominal.height);
     l.contentsScale = flat.scale;
     q3e_no_implicit_actions(l);
     [layer addSublayer:l];
 }
 
+// Everything the player sees as a control scales from ONE number, the size
+// slider. Scaling the layer's TRANSFORM rather than re-pathing its circle is what
+// makes the CONTENTS scale with it — the crosshair, the arrows, the ≡ glyph all
+// live as sublayers, and re-pathing could never touch them, so cranking the
+// slider used to grow the rings and leave the icons stranded at 100%. The stick,
+// its nub, its activation zone and the two menu buttons were not in the old list
+// at all and never scaled by any amount.
 - (void)applyControlStyle {
-    // re-path at scaled radii + apply opacity multiplier
-    void (^repath)(CAShapeLayer *, CGFloat, CGFloat) = ^(CAShapeLayer *l, CGFloat baseR, CGFloat baseA) {
-        CGFloat r = baseR * ctl_scale;
-        l.path = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(-r, -r, 2 * r, 2 * r)].CGPath;
+    const CGFloat k = ctl_scale;
+    void (^style)(CAShapeLayer *, CGFloat) = ^(CAShapeLayer *l, CGFloat baseA) {
+        l.transform = CATransform3DMakeScale(k, k, 1.0);
+        l.lineWidth = 2.0 / k;   // the transform scales the stroke too — keep ring weight constant
         l.fillColor = [UIColor colorWithWhite:1.0 alpha:MIN(baseA * ctl_alpha, 0.9)].CGColor;
-        l.strokeColor = [UIColor colorWithWhite:1.0 alpha:MIN((baseA + 0.15) * ctl_alpha, 0.95)].CGColor;
+        // Don't stomp the editor's highlight: the scale slider lives IN the editor,
+        // so this runs on every drag of it while the outlines are meant to be yellow.
+        l.strokeColor = self->_editing
+            ? [UIColor colorWithRed:1 green:0.85 blue:0.4 alpha:0.95].CGColor
+            : [UIColor colorWithWhite:1.0 alpha:MIN((baseA + 0.15) * ctl_alpha, 0.95)].CGColor;
     };
-    repath(_fireCircle, FIRE_RADIUS, 0.20);
-    repath(_jumpCircle, JUMP_RADIUS, 0.20);
-    repath(_wnextCircle, WPN_RADIUS, 0.16);
-    repath(_wprevCircle, WPN_RADIUS, 0.16);
-    repath(_crouchCircle, CROUCH_RADIUS, 0.18);
+    style(_fireCircle, 0.20);
+    style(_jumpCircle, 0.20);
+    style(_wnextCircle, 0.16);
+    style(_wprevCircle, 0.16);
+    style(_crouchCircle, 0.18);
+    style(_stickBase, 0.14);
+    style(_stickNub, 0.28);
+    style(_stickZone, 0.05);
+    style(_menuButton, 0.16);
+    style(_gearButton, 0.16);
     [self setNeedsLayout];
 }
 
@@ -748,8 +791,8 @@ static void q3e_no_implicit_actions(CALayer *l) {
     reg(_wnextCircle,  @"wnext",  WPN_RADIUS,    NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 58 * k,  sz.height - 300 * k); });
     reg(_wprevCircle,  @"wprev",  WPN_RADIUS,    NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 132 * k, sz.height - 300 * k); });
     reg(_crouchCircle, @"crouch", CROUCH_RADIUS, NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width * 0.923f, sz.height * 0.859f); }); // arranged on device
-    reg(_menuButton,   @"menu",   24.0f,         NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 48, 42); });
-    reg(_gearButton,   @"gear",   24.0f,         NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(48, 42); });
+    reg(_menuButton,   @"menu",   MENU_BTN_RADIUS, NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(sz.width - 48, 42); });
+    reg(_gearButton,   @"gear",   MENU_BTN_RADIUS, NO, ^CGPoint(CGSize sz, CGFloat k) { return CGPointMake(48, 42); });
     [self loadControlPositions];
 }
 
@@ -784,7 +827,7 @@ static void q3e_no_implicit_actions(CALayer *l) {
 - (Q3EControl *)placeableAt:(CGPoint)p {
     Q3EControl *best = nil;   // smallest wins, so a button inside the stick circle stays grabbable
     for (Q3EControl *c in _controls) {
-        CGFloat r = c.baseRadius * (c.zoneOnly ? 1.0f : ctl_scale);
+        CGFloat r = c.baseRadius * ctl_scale;   // == what the editor draws
         CGFloat dx = p.x - c.layer.position.x, dy = p.y - c.layer.position.y;
         if (dx * dx + dy * dy <= r * r && (!best || c.baseRadius < best.baseRadius))
             best = c;
@@ -792,9 +835,21 @@ static void q3e_no_implicit_actions(CALayer *l) {
     return best;
 }
 
+// The move zone scales with everything else: the stick's own throw radius already
+// did (STICK_RADIUS * ctl_scale in touchesMoved), so a fixed zone meant the
+// activation area and the stick it activates disagreed at any scale but 100%.
+// The editor draws this circle at exactly this radius.
 - (BOOL)pointInMoveZone:(CGPoint)p {
+    const CGFloat r = STICK_ZONE_R * ctl_scale;
     CGFloat dx = p.x - _stickZone.position.x, dy = p.y - _stickZone.position.y;
-    return dx * dx + dy * dy <= STICK_ZONE_R * STICK_ZONE_R;
+    return dx * dx + dy * dy <= r * r;
+}
+
+// ≡ / ⚙ touch target. Scales like everything else, but never below the ~44 pt
+// diameter a fingertip needs — shrinking the controls must not make Esc unhittable.
+static CGFloat q3e_menu_hit_radius(void) {
+    CGFloat r = MENU_BTN_HIT * ctl_scale;
+    return r < 26.0f ? 26.0f : r;
 }
 
 - (void)layoutSubviews {
@@ -879,11 +934,11 @@ static void q3e_no_implicit_actions(CALayer *l) {
     }
     for (UITouch *t in touches) {
         CGPoint p = [t locationInView:self];
-        if (!_gearButton.hidden && [self point:p inCircle:_gearButton radius:34.0f]) {
+        if (!_gearButton.hidden && [self point:p inCircle:_gearButton radius:q3e_menu_hit_radius()]) {
             _gearBtnTouch = t;              // ⚙ tap = open settings on release
             continue;
         }
-        if (!_menuButton.hidden && [self point:p inCircle:_menuButton radius:34.0f]) {
+        if (!_menuButton.hidden && [self point:p inCircle:_menuButton radius:q3e_menu_hit_radius()]) {
             _menuBtnTouch = t;              // ≡ tap = ESC on release
             continue;
         }
@@ -1199,7 +1254,7 @@ static void q3e_no_implicit_actions(CALayer *l) {
     UIButton *done  = pill(@"checkmark", [UIColor colorWithRed:0.18 green:0.78 blue:0.34 alpha:0.95], @selector(endEditingLayout));
 
     UISlider *sl = [UISlider new];
-    sl.minimumValue = 0.6f; sl.maximumValue = 1.6f; sl.value = ctl_scale;
+    sl.minimumValue = CTL_SCALE_MIN; sl.maximumValue = CTL_SCALE_MAX; sl.value = ctl_scale;
     sl.minimumTrackTintColor = [UIColor colorWithWhite:1 alpha:0.9];
     sl.translatesAutoresizingMaskIntoConstraints = NO;
     [sl addTarget:self action:@selector(editScaleChanged:) forControlEvents:UIControlEventValueChanged];
@@ -1238,8 +1293,8 @@ static void q3e_no_implicit_actions(CALayer *l) {
 }
 
 - (void)editScaleChanged:(UISlider *)sl {
-    ctl_scale = sl.value;
-    [NSUserDefaults.standardUserDefaults setFloat:sl.value forKey:@"q3e_ctl_scale"];
+    ctl_scale = q3e_clamp_scale(sl.value);
+    [NSUserDefaults.standardUserDefaults setFloat:ctl_scale forKey:@"q3e_ctl_scale"];
     [self applyControlStyle];
     [self updateScaleLabel];
 }
@@ -1248,8 +1303,7 @@ static void q3e_no_implicit_actions(CALayer *l) {
     if (!_editing) return;
     [self commitDrag];
     _editing = NO;
-    for (Q3EControl *c in _controls)
-        c.layer.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
+    [self applyControlStyle];   // back to the per-control stroke/opacity
     _stickZone.hidden = YES;
     _stickBase.hidden = _stickNub.hidden = YES;
     [_editBar removeFromSuperview];

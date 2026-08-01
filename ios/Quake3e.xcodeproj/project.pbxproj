@@ -18,6 +18,7 @@
 		1A1B861A4D5B98583A0BEA2B /* GameController.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E54F9A25DC37C6780486BC76 /* GameController.framework */; };
 		1EE7471BB794DF2CF1EBDE05 /* Q3EImmersive.m in Sources */ = {isa = PBXBuildFile; fileRef = F19A3D9E8C56D2A21796B565 /* Q3EImmersive.m */; };
 		22936B92BD2143F15F69BDD7 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9F147F24E9462C77D359242F /* Security.framework */; };
+		27F9BA1985E78C2B5411AD20 /* ios_audio.m in Sources */ = {isa = PBXBuildFile; fileRef = E826F1F0CCAADACCEE5B603C /* ios_audio.m */; };
 		291384D045C153E2CA0B0B9B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DC9C85CCB2D7E73FBDF9A8F5 /* Assets.xcassets */; };
 		29603872B366A1CDE089C17A /* ios_settings.m in Sources */ = {isa = PBXBuildFile; fileRef = 66978FAE2B803D616BE6176F /* ios_settings.m */; };
 		297FAFDB2059827D2A1D033F /* GameController.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E54F9A25DC37C6780486BC76 /* GameController.framework */; };
@@ -32,6 +33,7 @@
 		549E7E6613B464348580B528 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AB8F52D7E98B32EC7FA91D30 /* Metal.framework */; };
 		5C0D505B2C25783B4AEED994 /* ios_snd.c in Sources */ = {isa = PBXBuildFile; fileRef = 6FA43AC1FB6966A5F89DA82F /* ios_snd.c */; };
 		5C4877EB156210EB0C2FF86A /* ios_metal.m in Sources */ = {isa = PBXBuildFile; fileRef = E49EC9B3284D1B2BC896644E /* ios_metal.m */; };
+		5C925608C75E3EA7EE5EE114 /* ios_audio.m in Sources */ = {isa = PBXBuildFile; fileRef = E826F1F0CCAADACCEE5B603C /* ios_audio.m */; };
 		61297CAD9D85A0D91D5EE098 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5612936E65EAA6B94B487548 /* Foundation.framework */; };
 		65A629987B0F5D8630F2839B /* CoreVideo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CDB03F055C45BB54AD8A402B /* CoreVideo.framework */; };
 		715D1C24AEB0F5EFAAE1671C /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 36CC490E0E38BA5D925C297D /* CoreGraphics.framework */; };
@@ -67,6 +69,7 @@
 /* Begin PBXFileReference section */
 		0A872BF429A97D8C1D97B3D8 /* MoltenVK.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = MoltenVK.xcframework; path = ../vendor/moltenvk/MoltenVK.xcframework; sourceTree = "<group>"; };
 		0AF1B1EB09A3FC44B64B1BFE /* MoltenVK.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = MoltenVK.xcframework; path = "../vendor/moltenvk-ios/MoltenVK/MoltenVK/static/MoltenVK.xcframework"; sourceTree = "<group>"; };
+		0E9B00160D1137ACAE4935A2 /* ios_audio.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ios_audio.h; sourceTree = "<group>"; };
 		248D5F9516594A2CDD56EBF2 /* ios_settings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ios_settings.h; sourceTree = "<group>"; };
 		2613F93EAAD8CEB8ADDA6187 /* ios_input.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ios_input.h; sourceTree = "<group>"; };
 		27ED7D3368034171C2632367 /* Q3EVision-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Q3EVision-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -104,6 +107,7 @@
 		E45895A54BB1884716BCCD15 /* Quake3e-visionOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Quake3e-visionOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		E49EC9B3284D1B2BC896644E /* ios_metal.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ios_metal.m; sourceTree = "<group>"; };
 		E54F9A25DC37C6780486BC76 /* GameController.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = GameController.framework; path = System/Library/Frameworks/GameController.framework; sourceTree = SDKROOT; };
+		E826F1F0CCAADACCEE5B603C /* ios_audio.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ios_audio.m; sourceTree = "<group>"; };
 		F0B388950920F898909CA77E /* CompositorServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CompositorServices.framework; path = System/Library/Frameworks/CompositorServices.framework; sourceTree = SDKROOT; };
 		F19A3D9E8C56D2A21796B565 /* Q3EImmersive.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Q3EImmersive.m; sourceTree = "<group>"; };
 		F8291DC06CA7B3C93F2C8EF3 /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
@@ -209,6 +213,8 @@
 			isa = PBXGroup;
 			children = (
 				D9CE7C66352300892A1B6B0D /* AppShell.m */,
+				0E9B00160D1137ACAE4935A2 /* ios_audio.h */,
+				E826F1F0CCAADACCEE5B603C /* ios_audio.m */,
 				2AC36C1F39314DF1FE314BE7 /* ios_console.m */,
 				7D7173C31A62848743DF3F01 /* ios_glue.c */,
 				2613F93EAAD8CEB8ADDA6187 /* ios_input.h */,
@@ -346,6 +352,7 @@
 			files = (
 				BEF9BEE79FB9A84EFD713454 /* AppShell.m in Sources */,
 				FA2E424463ABBC44CA7574B7 /* Q3EIntents.swift in Sources */,
+				27F9BA1985E78C2B5411AD20 /* ios_audio.m in Sources */,
 				A97BDE7175999A5496A08649 /* ios_console.m in Sources */,
 				F821306993D95659E95D50C3 /* ios_glue.c in Sources */,
 				D89976254862A86FF580079F /* ios_input.m in Sources */,
@@ -365,6 +372,7 @@
 				AFD85AD72972E99E7C2D1DEA /* Q3EBlackBox.m in Sources */,
 				1EE7471BB794DF2CF1EBDE05 /* Q3EImmersive.m in Sources */,
 				3B61A3E8638070FB91F6E292 /* Q3EVisionApp.swift in Sources */,
+				5C925608C75E3EA7EE5EE114 /* ios_audio.m in Sources */,
 				46B51525D7D2D4AC369CFC1E /* ios_console.m in Sources */,
 				3EF3A7E612ACC72480EF43CC /* ios_glue.c in Sources */,
 				3C6B2D17CB34D2093C4CF687 /* ios_input.m in Sources */,
