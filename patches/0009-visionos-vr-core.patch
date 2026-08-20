@@ -1,0 +1,835 @@
+--- a/code/renderervk/tr_local.h
++++ b/code/renderervk/tr_local.h
+@@ -632,7 +632,29 @@
+ 	PV_MIRROR, // portal + inverted face culling
+ 	PV_COUNT
+ } portalView_t;
++
++#ifdef USE_VULKAN
++// --- visionOS VR (overlay patch 0009) --------------------------------------
++// State the shell publishes once per engine frame, inside the pose rendezvous,
++// so the engine only ever reads it from its own thread. Defined in vk.c next to
++// the 3D-panel stereo state; every consumer is gated on vk_vr_active, which no
++// other build ever sets — the macOS oracle and the iPhone app compile the same
++// sources and take none of these branches.
++extern int   vk_vr_active;			// a VR world frame is being built
++extern int   vk_vr_eye_index;		// eye the shell published last (0=L, 1=R)
++extern float vk_vr_znear;			// 0.1 m x worldScale, in game units
++extern float vk_vr_eye_offset[2][3];	// body-frame offset, game units (fwd, left, up)
++extern float vk_vr_eye_axis[2][3][3];	// body-frame eye basis, Q3 convention
++extern float vk_vr_eye_tangents[2][4];	// left, right, bottom, top
++extern float vk_vr_cull_tangents[2][2];	// bottom/top tangents the CULL PLANES encode tangents
+ 
++// Compose the published per-eye pose over the game's view. The base is the
++// game's own view origin and a YAW-ONLY body basis: pitch and roll belong to
++// the head, and taking them from the game view would apply them twice.
++void R_VRComposeEye( const float vieworg[3], const float viewaxis[3][3], int eye,
++					 float outOrigin[3], float outAxis[3][3] );
++#endif
++
+ typedef struct {
+ 	orientationr_t	or;
+ 	orientationr_t	world;
+@@ -649,6 +671,12 @@
+ 	vec3_t		visBounds[2];
+ 	float		zFar;
+ 	stereoFrame_t	stereoFrame;
++	// visionOS VR: this view is a per-eye VR world view, and which eye it is.
++	// Carried in the view rather than in a global because the backend runs
++	// behind the frontend and portal/mirror views are derived by copying the
++	// parent's parms — both of which a global would get wrong.
++	int			vrView;
++	int			vrEye;			// 0 = left, 1 = right
+ #ifdef USE_PMLIGHT
+ 	// each view will have its own dlight set
+ 	unsigned int num_dlights;
+--- a/code/renderervk/tr_main.c
++++ b/code/renderervk/tr_main.c
+@@ -491,8 +491,30 @@
+ the projection matrix.
+ =================
+ */
+-static void R_SetupFrustum( viewParms_t *dest, float xmin, float xmax, float ymax, float zProj, float stereoSep )
++/*
++=================
++R_ZNear
++
++The near plane, in game units. In VR it is the compositor's own near plane
++(0.1 m) taken through the world scale rather than r_znear, because matching the
++compositor's projection numerically is what makes the depth handoff need no
++conversion — and a conversion that does not exist cannot be got wrong. It is
++deliberately not done by driving the r_znear CVAR, which is archived: an
++override live during a crash bakes itself into the player's config forever.
++=================
++*/
++static float R_ZNear( const viewParms_t *dest )
+ {
++#ifdef USE_VULKAN
++	if ( dest->vrView && vk_vr_znear > 0.0f )
++		return vk_vr_znear;
++#endif
++	return r_znear->value;
++}
++
++
++static void R_SetupFrustum( viewParms_t *dest, float xmin, float xmax, float ymin, float ymax, float zProj, float stereoSep )
++{
+ 	vec3_t ofsorigin;
+ 	float oppleg, adjleg, length;
+ 	int i;
+@@ -529,16 +551,50 @@
+ 		VectorMA(dest->frustum[1].normal, -zProj / length, dest->or.axis[1], dest->frustum[1].normal);
+ 	}
+ 
+-	length = sqrt(ymax * ymax + zProj * zProj);
+-	oppleg = ymax / length;
++	// Vertical planes, generalized to an asymmetric frustum exactly the way the
++	// horizontal pair above already is: each plane built from ITS OWN edge.
++	// frustum[2] is the BOTTOM plane (its normal carries +axis[2], so points
++	// below it fall outside) and is therefore derived from ymin; frustum[3] is
++	// the TOP plane and is derived from ymax. With ymin == -ymax the two reduce
++	// term for term to the previous symmetric form (-ymin == ymax exactly), so
++	// nothing outside VR changes.
++	//
++	// Getting these two the wrong way round is silent in every symmetric build
++	// and cuts a band off the bottom of every eye in an asymmetric one, which is
++	// exactly the class of defect this generalization exists to prevent.
++	length = sqrt(ymin * ymin + zProj * zProj);
++	oppleg = ymin / length;
+ 	adjleg = zProj / length;
+ 
+-	VectorScale(dest->or.axis[0], oppleg, dest->frustum[2].normal);
++	VectorScale(dest->or.axis[0], -oppleg, dest->frustum[2].normal);
+ 	VectorMA(dest->frustum[2].normal, adjleg, dest->or.axis[2], dest->frustum[2].normal);
++
++	length = sqrt(ymax * ymax + zProj * zProj);
++	oppleg = ymax / length;
++	adjleg = zProj / length;
+ 
+ 	VectorScale(dest->or.axis[0], oppleg, dest->frustum[3].normal);
+ 	VectorMA(dest->frustum[3].normal, -adjleg, dest->or.axis[2], dest->frustum[3].normal);
+-	
++
++#ifdef USE_VULKAN
++	// Publish the tangents the vertical cull planes ACTUALLY encode, recovered
++	// from the finished normals. A plane attached to the wrong edge is invisible
++	// in every symmetric build and, in an asymmetric one, shows only as distant
++	// geometry disappearing — which no screenshot assertion can reliably catch,
++	// because BSP culling is per-node and near surfaces straddle the plane
++	// either way. So the identity of each plane is reported, not its intent.
++	if ( dest->vrView ) {
++		const int eye = ( dest->vrEye == 1 ) ? 1 : 0;
++		float d0, d2;
++		d0 = DotProduct( dest->frustum[2].normal, dest->or.axis[0] );
++		d2 = DotProduct( dest->frustum[2].normal, dest->or.axis[2] );
++		vk_vr_cull_tangents[eye][0] = ( d2 != 0.0f ) ? -d0 / d2 : 0.0f;   // bottom
++		d0 = DotProduct( dest->frustum[3].normal, dest->or.axis[0] );
++		d2 = DotProduct( dest->frustum[3].normal, dest->or.axis[2] );
++		vk_vr_cull_tangents[eye][1] = ( d2 != 0.0f ) ? -d0 / d2 : 0.0f;   // top
++	}
++#endif
++
+ 	for (i=0 ; i<4 ; i++) {
+ 		dest->frustum[i].type = PLANE_NON_AXIAL;
+ 		dest->frustum[i].dist = DotProduct (ofsorigin, dest->frustum[i].normal);
+@@ -548,9 +604,52 @@
+ 	// near clipping plane
+ 	VectorCopy( dest->or.axis[0], dest->frustum[4].normal );
+ 	dest->frustum[4].type = PLANE_NON_AXIAL;
+-	dest->frustum[4].dist = DotProduct( ofsorigin, dest->frustum[4].normal ) + r_znear->value;
++	dest->frustum[4].dist = DotProduct( ofsorigin, dest->frustum[4].normal ) + R_ZNear( dest );
+ 	SetPlaneSignbits( &dest->frustum[4] );
++}
++
++
++#ifdef USE_VULKAN
++/*
++=================
++R_VRComposeEye
++
++The compositor supplies each eye's pose in the player's own body frame; this
++puts it into world space. The base placement is the game's view origin with a
++YAW-ONLY basis — the head owns pitch and roll, and lifting them out of the game
++view as well would apply them twice.
++=================
++*/
++void R_VRComposeEye( const float vieworg[3], const float viewaxis[3][3], int eye,
++					 float outOrigin[3], float outAxis[3][3] )
++{
++	vec3_t body[3];
++	float yaw, s, c;
++	int i;
++
++	if ( eye < 0 || eye > 1 )
++		eye = 0;
++
++	yaw = atan2( viewaxis[0][1], viewaxis[0][0] );
++	s = sin( yaw );
++	c = cos( yaw );
++
++	VectorSet( body[0],  c,  s, 0.0f );		// forward
++	VectorSet( body[1], -s,  c, 0.0f );		// left
++	VectorSet( body[2], 0.0f, 0.0f, 1.0f );	// up
++
++	VectorCopy( vieworg, outOrigin );
++	for ( i = 0; i < 3; i++ ) {
++		VectorMA( outOrigin, vk_vr_eye_offset[eye][i], body[i], outOrigin );
++	}
++
++	for ( i = 0; i < 3; i++ ) {
++		VectorScale( body[0], vk_vr_eye_axis[eye][i][0], outAxis[i] );
++		VectorMA( outAxis[i], vk_vr_eye_axis[eye][i][1], body[1], outAxis[i] );
++		VectorMA( outAxis[i], vk_vr_eye_axis[eye][i][2], body[2], outAxis[i] );
++	}
+ }
++#endif
+ 
+ 
+ /*
+@@ -602,6 +701,38 @@
+ 	xmax = zProj * tan(dest->fovX * M_PI / 360.0f);
+ 	xmin = -xmax;
+ 
++#ifdef USE_VULKAN
++	// visionOS VR (patch 0009): the compositor's per-eye frustum is asymmetric in
++	// BOTH axes and its shape is recovered as TANGENTS, never as an FOV — an FOV
++	// cannot express an off-centre frustum, and hand-rolling one from it is how a
++	// port ends up with a world that is subtly the wrong size. The matrix already
++	// carries both off-centre terms ([8] and [9]); only [9] was being left at its
++	// "normally 0" value. The pose has already separated the eyes, so the stereo
++	// shift must not also apply.
++	if ( dest->vrView ) {
++		const int eye = ( dest->vrEye == 1 ) ? 1 : 0;
++		const float *t = vk_vr_eye_tangents[eye];
++		// A degenerate set (never published, or published as zeros because the
++		// space failed to open) would divide by a zero width and fill the whole
++		// projection with NaN — a frame of pure noise in full immersion. Keep the
++		// game's own symmetric frustum instead and say so once.
++		if ( t[1] > t[0] && t[3] > t[2] ) {
++			stereoSep = 0.0f;
++			xmin = zProj * t[0];
++			xmax = zProj * t[1];
++			ymin = zProj * t[2];
++			ymax = zProj * t[3];
++		} else {
++			static qboolean warned = qfalse;
++			if ( !warned ) {
++				warned = qtrue;
++				ri.Printf( PRINT_WARNING, "VR: degenerate eye tangents (%g %g %g %g) — "
++					"falling back to the game FOV for this view\n", t[0], t[1], t[2], t[3] );
++			}
++		}
++	}
++#endif
++
+ 	width = xmax - xmin;
+ 	height = ymax - ymin;
+ 	
+@@ -622,7 +753,7 @@
+ 	
+ 	// Now that we have all the data for the projection matrix we can also setup the view frustum.
+ 	if ( computeFrustum )
+-		R_SetupFrustum( dest, xmin, xmax, ymax, zProj, stereoSep );
++		R_SetupFrustum( dest, xmin, xmax, ymin, ymax, zProj, stereoSep );
+ }
+ 
+ 
+@@ -635,7 +766,7 @@
+ */
+ static void R_SetupProjectionZ( viewParms_t *dest )
+ {
+-	const float zNear = r_znear->value;
++	const float zNear = R_ZNear( dest );
+ 	const float zFar = dest->zFar;
+ 	const float depth = zFar - zNear;
+ 
+@@ -643,8 +774,19 @@
+ 	dest->projectionMatrix[6] = 0;
+ #ifdef USE_VULKAN
+ #ifdef USE_REVERSED_DEPTH
++	// visionOS VR (patch 0009): reverse-Z with an INFINITE far plane. This engine
++	// is already reverse-Z (USE_REVERSED_DEPTH is unconditional here), so there is
++	// no convention to flip — the only difference from the compositor's own
++	// projection is the finite far plane, and removing it makes the depth values
++	// the engine writes exactly the values the compositor expects to reproject
++	// against. Evaluated: eye distance zNear -> 1.0, distance -> infinity -> 0.0.
++	if ( dest->vrView ) {
++		dest->projectionMatrix[10] = 0.0f;
++		dest->projectionMatrix[14] = zNear;
++	} else {
+ 	dest->projectionMatrix[10] = zNear / depth;
+ 	dest->projectionMatrix[14] = zFar * zNear / depth;
++	}
+ #else
+ 	dest->projectionMatrix[10] = - zFar / depth;
+ 	dest->projectionMatrix[14] = - zFar * zNear / depth;
+@@ -662,8 +804,18 @@
+ 
+ #ifdef USE_VULKAN
+ #ifdef USE_REVERSED_DEPTH
++		// The portal path builds the oblique-clip matrix in the NON-reversed
++		// convention and negates it back at the tail, so the VR infinite-far
++		// variant has to be expressed here too. Its non-reversed form is
++		// m10 = -1, m14 = -zNear, which leaves the q[3] the clip math derives
++		// from them identical to the finite case.
++		if ( dest->vrView ) {
++			dest->projectionMatrix[10] = -1.0f;
++			dest->projectionMatrix[14] = -zNear;
++		} else {
+ 		dest->projectionMatrix[10] = - zFar / depth;
+ 		dest->projectionMatrix[14] = - zFar * zNear / depth;
++		}
+ #endif
+ #endif
+ 		// transform portal plane into camera space
+--- a/code/renderervk/tr_scene.c
++++ b/code/renderervk/tr_scene.c
+@@ -511,6 +511,32 @@
+ 	VectorCopy( fd->vieworg, parms.pvsOrigin );
+ 
+ #ifdef USE_VULKAN
++	// visionOS VR (patch 0009): compose the compositor's per-eye pose over the
++	// game's view. Which eye this field is comes from stereoFrame — the client
++	// already renders both fields per host frame for the 3D panel, and VR is that
++	// same path with a head pose on it.
++	//
++	// pvsOrigin deliberately STAYS at the game's vieworg: the potentially-visible
++	// set must follow the player, not the head, or leaning towards a doorway culls
++	// the room on the other side of it away. Portal and mirror views re-enter
++	// R_RenderView with parms copied from here, so they inherit the eye pose (and
++	// the vrView/vrEye tags) by construction.
++	//
++	// HUD scenes (RDF_NOWORLDMODEL — the 3D head and item icons the cgame draws
++	// into the status bar) are NOT world views and must keep the pose cgame gave
++	// them; they are flattened in VR by the shell the same way the 3D panel does it.
++	if ( vk_vr_active && !( fd->rdflags & RDF_NOWORLDMODEL ) ) {
++		float vrOrigin[3];
++		float vrAxis[3][3];
++		parms.vrView = 1;
++		parms.vrEye = ( parms.stereoFrame == STEREO_RIGHT ) ? 1 : 0;
++		R_VRComposeEye( fd->vieworg, fd->viewaxis, parms.vrEye, vrOrigin, vrAxis );
++		VectorCopy( vrOrigin, parms.or.origin );
++		VectorCopy( vrAxis[0], parms.or.axis[0] );
++		VectorCopy( vrAxis[1], parms.or.axis[1] );
++		VectorCopy( vrAxis[2], parms.or.axis[2] );
++	}
++
+ 	lastRenderCommand = tr.lastRenderCommand;
+ 	tr.drawSurfCmd = NULL;
+ 	tr.numDrawSurfCmds = 0;
+--- a/code/renderervk/tr_backend.c
++++ b/code/renderervk/tr_backend.c
+@@ -699,6 +699,21 @@
+ 					if(backEnd.currentEntity->e.renderfx & RF_CROSSHAIR)
+ 						isCrosshair = qtrue;
+ 				}
++#ifdef USE_VULKAN
++				// visionOS VR (patch 0009): the depth hack must NOT apply in VR. It
++				// squashes the weapon into the near 40% of the depth range so that a
++				// screen-space viewmodel cannot poke through walls — which makes the
++				// depth those fragments store metrically meaningless, and the
++				// compositor reprojects against exactly those values. In VR the gun
++				// is an object at a real distance and its real depth is the correct
++				// one. The same argument retires patch 0008's stereo re-projection
++				// below, which exists to park a screen-space weapon at the screen
++				// plane: there is no screen.
++				if ( backEnd.viewParms.vrView ) {
++					depthRange = qfalse;
++					isCrosshair = qfalse;
++				}
++#endif
+ 			} else {
+ 				backEnd.currentEntity = &tr.worldEntity;
+ 				backEnd.refdef.floatTime = originalTime;
+@@ -938,6 +953,21 @@
+ 					if(backEnd.currentEntity->e.renderfx & RF_CROSSHAIR)
+ 						isCrosshair = qtrue;
+ 				}
++#ifdef USE_VULKAN
++				// visionOS VR (patch 0009): the depth hack must NOT apply in VR. It
++				// squashes the weapon into the near 40% of the depth range so that a
++				// screen-space viewmodel cannot poke through walls — which makes the
++				// depth those fragments store metrically meaningless, and the
++				// compositor reprojects against exactly those values. In VR the gun
++				// is an object at a real distance and its real depth is the correct
++				// one. The same argument retires patch 0008's stereo re-projection
++				// below, which exists to park a screen-space weapon at the screen
++				// plane: there is no screen.
++				if ( backEnd.viewParms.vrView ) {
++					depthRange = qfalse;
++					isCrosshair = qfalse;
++				}
++#endif
+ 			} else {
+ 				backEnd.currentEntity = &tr.worldEntity;
+ 				backEnd.refdef.floatTime = originalTime;
+--- a/code/renderervk/tr_init.c
++++ b/code/renderervk/tr_init.c
+@@ -502,6 +502,14 @@
+ #endif
+ 
+ 
++#ifdef USE_VULKAN
++// visionOS VR (overlay patch 0009) — defined in vk.c. Zero in every other build,
++// so the branches below compile to the stock behaviour everywhere else.
++extern int vk_vr_wanted;
++extern int vk_vr_extent_refusals;
++#endif
++
++
+ /*
+ ** InitOpenGL
+ **
+@@ -544,8 +552,32 @@
+ 
+ 		if ( r_fbo->integer )
+ 		{
+-			if ( r_renderScale->integer )
++			int extentIsClaimed = 0;
++#ifdef USE_VULKAN
++			// visionOS VR (overlay patch 0009) OWNS the render extent while it is
++			// wanted: the per-eye size arrives through the platform layer above
++			// and nothing may re-derive it afterwards. r_renderScale /
++			// r_renderWidth / r_renderHeight and r_ext_supersample are
++			// CVAR_ARCHIVE_ND|CVAR_LATCH, so a value a player (or an old build)
++			// set once lives in their config forever and silently re-pins EVERY
++			// later renderer init to a resolution that has nothing to do with the
++			// drawable. Harmless while it happens to match the window; fatal in
++			// VR, where the extent then never moves and the two-phase entry polls
++			// for a change that cannot happen. Refusals are counted and named,
++			// because a silent override is what made this cost a device round.
++			extentIsClaimed = vk_vr_wanted;
++			if ( extentIsClaimed && ( r_renderScale->integer || r_ext_supersample->integer ) )
+ 			{
++				vk_vr_extent_refusals++;
++				ri.Printf( PRINT_ALL, "VR owns the render extent %dx%d: REFUSED r_renderScale %d "
++					"(%dx%d) / r_ext_supersample %d\n",
++					glConfig.vidWidth, glConfig.vidHeight,
++					r_renderScale->integer, r_renderWidth->integer, r_renderHeight->integer,
++					r_ext_supersample->integer );
++			}
++#endif
++			if ( r_renderScale->integer && !extentIsClaimed )
++			{
+ 				glConfig.vidWidth = r_renderWidth->integer;
+ 				glConfig.vidHeight = r_renderHeight->integer;
+ 			}
+@@ -555,7 +587,7 @@
+ 
+ 			ri.CL_SetScaling( 1.0, gls.captureWidth, gls.captureHeight );
+ 
+-			if ( r_ext_supersample->integer )
++			if ( r_ext_supersample->integer && !extentIsClaimed )
+ 			{
+ 				glConfig.vidWidth *= 2;
+ 				glConfig.vidHeight *= 2;
+--- a/code/renderervk/vk.c
++++ b/code/renderervk/vk.c
+@@ -394,6 +394,13 @@
+ 		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+ 			src_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+ 			barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
++			break;
++		// visionOS VR (patch 0009): the depth attachment is copied out for the
++		// compositor, so it now appears as a transition SOURCE — it never did
++		// before, and the default arm of this switch is a fatal error.
++		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
++			src_stage = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
++			barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+ 			break;
+ 		case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+ 			src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+@@ -673,6 +680,10 @@
+ }
+ 
+ 
++// visionOS VR (patch 0009) — defined with the rest of the VR state further down;
++// the render-pass description needs it before that point.
++extern int vk_vr_wanted;
++
+ static void vk_create_render_passes( void )
+ {
+ 	VkAttachmentDescription attachments[3]; // color | depth | msaa color
+@@ -735,7 +746,10 @@
+ 	attachments[1].samples = vkSamples;
+ 	attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; // Need empty depth buffer before use
+ 	attachments[1].stencilLoadOp = glConfig.stencilBits ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+-	if ( r_bloom->integer ) {
++	// visionOS VR (patch 0009): DONT_CARE on a tile GPU throws the depth buffer
++	// away at end of pass, which is exactly the depth the compositor needs. VR
++	// keeps it for the same reason bloom does.
++	if ( r_bloom->integer || vk_vr_wanted ) {
+ 		attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // keep it for post-bloom pass
+ 		attachments[1].stencilStoreOp = glConfig.stencilBits ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+ 	} else {
+@@ -3289,7 +3303,31 @@
+ static VkImageView q3s_eye_image_view[2];
+ void vk_stereo3d_snapshot( int idx );        // defined with the shell exports below
+ 
++// visionOS VR (patch 0009). vk_vr_active gates every VR branch in the renderer
++// and is only ever set by the visionOS shell — the macOS oracle and the iPhone
++// app compile the same sources and take none of them. vk_vr_wanted is the
++// build-time-of-attachments half: it must be set BEFORE renderer init (i.e.
++// before the vid_restart that VR entry performs anyway), because it decides
++// whether the depth attachment is memoryless.
++int   vk_vr_active = 0;
++int   vk_vr_wanted = 0;
++// Times the renderer refused to let an archived render-size cvar re-derive the
++// extent VR had claimed (tr_init.c). Published so the shell can assert the
++// IDENTITY of the thing that would otherwise have silently pinned the extent,
++// rather than only the size that came out of it.
++int   vk_vr_extent_refusals = 0;
++int   vk_vr_eye_index = 0;
++float vk_vr_znear = 0.0f;                    // 0.1 m x worldScale, in game units
++float vk_vr_eye_offset[2][3];                // body-frame offset, game units
++float vk_vr_eye_axis[2][3][3];               // body-frame eye basis, Q3 convention
++float vk_vr_eye_tangents[2][4];              // left, right, bottom, top
++float vk_vr_cull_tangents[2][2];             // what the cull planes encode (measured)
++static VkImage     q3s_eye_depth[2];         // per-eye DEPTH snapshots
++static VkImageView q3s_eye_depth_view[2];
++static int         q3s_depth_copies = 0;
++static VkFence     q3s_last_submit_fence = VK_NULL_HANDLE;
+ 
++
+ static void vk_alloc_attachments( void )
+ {
+ 	VkImageViewCreateInfo view_desc;
+@@ -3486,7 +3524,10 @@
+ }
+ 
+ 
+-static void create_depth_attachment( uint32_t width, uint32_t height, VkSampleCountFlagBits samples, VkImage *image, VkImageView *image_view, qboolean allowTransient )
++// extraUsage exists for the VR depth handoff: the main depth attachment needs
++// TRANSFER_SRC to be copied out, and the per-eye snapshots need SAMPLED |
++// TRANSFER_DST to be copied into and then read as Metal textures.
++static void create_depth_attachment( uint32_t width, uint32_t height, VkSampleCountFlagBits samples, VkImage *image, VkImageView *image_view, qboolean allowTransient, VkImageUsageFlags extraUsage )
+ {
+ 	VkImageCreateInfo create_desc;
+ 	VkMemoryRequirements memory_requirements;
+@@ -3505,7 +3546,7 @@
+ 	create_desc.arrayLayers = 1;
+ 	create_desc.samples = samples;
+ 	create_desc.tiling = VK_IMAGE_TILING_OPTIMAL;
+-	create_desc.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
++	create_desc.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | extraUsage;
+ 	if ( allowTransient ) {
+ 		create_desc.usage |= VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+ 	}
+@@ -3575,6 +3616,21 @@
+ 				VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &q3s_eye_image[0], &q3s_eye_image_view[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, qfalse );
+ 			create_color_attachment( glConfig.vidWidth, glConfig.vidHeight, VK_SAMPLE_COUNT_1_BIT, vk.color_format,
+ 				VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &q3s_eye_image[1], &q3s_eye_image_view[1], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, qfalse );
++
++			// visionOS VR (patch 0009): the matching per-eye DEPTH snapshots. The
++			// compositor reprojects against depth, so a VR frame that hands over
++			// colour alone is reprojected as if it were flat. Same extent and
++			// format as the depth attachment they are copied from, so
++			// vkCmdCopyImage is legal; single-sample only (see the attachment
++			// comment below).
++			if ( vk_vr_wanted && vkSamples == VK_SAMPLE_COUNT_1_BIT ) {
++				create_depth_attachment( glConfig.vidWidth, glConfig.vidHeight, VK_SAMPLE_COUNT_1_BIT,
++					&q3s_eye_depth[0], &q3s_eye_depth_view[0], qfalse,
++					VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT );
++				create_depth_attachment( glConfig.vidWidth, glConfig.vidHeight, VK_SAMPLE_COUNT_1_BIT,
++					&q3s_eye_depth[1], &q3s_eye_depth_view[1], qfalse,
++					VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT );
++			}
+ 		}
+ 
+ 		// screenmap-msaa
+@@ -3588,7 +3644,7 @@
+ 			usage, &vk.screenMap.color_image, &vk.screenMap.color_image_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, qfalse );
+ 
+ 		// screenmap depth
+-		create_depth_attachment( vk.screenMapWidth, vk.screenMapHeight, vk.screenMapSamples, &vk.screenMap.depth_image, &vk.screenMap.depth_image_view, qtrue );
++		create_depth_attachment( vk.screenMapWidth, vk.screenMapHeight, vk.screenMapSamples, &vk.screenMap.depth_image, &vk.screenMap.depth_image_view, qtrue, 0 );
+ 
+ 		if ( vk.msaaActive ) {
+ 			create_color_attachment( glConfig.vidWidth, glConfig.vidHeight, vkSamples, vk.color_format,
+@@ -3605,8 +3661,16 @@
+ 
+ 	//vk_alloc_attachments();
+ 
++	// visionOS VR (patch 0009): the depth attachment is normally TRANSIENT, which
++	// on an Apple GPU means memoryless — the depth buffer does not exist in memory
++	// once the pass ends, so there is nothing to hand the compositor. When VR is
++	// wanted it loses the transient bit and gains TRANSFER_SRC, exactly the shape
++	// the r_bloom branch beside it already has. Multisampled depth cannot be
++	// copied into a single-sample snapshot, which is the other reason VR forces
++	// MSAA off (a single-sample snapshot is also what makes it VALID).
+ 	create_depth_attachment( glConfig.vidWidth, glConfig.vidHeight, vkSamples, &vk.depth_image, &vk.depth_image_view,
+-		(vk.fboActive && r_bloom->integer) ? qfalse : qtrue );
++		(vk.fboActive && (r_bloom->integer || vk_vr_wanted)) ? qfalse : qtrue,
++		vk_vr_wanted ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0 );
+ 
+ 	vk_alloc_attachments();
+ 
+@@ -3845,6 +3909,11 @@
+ 	vk.rendering_finished = VK_NULL_HANDLE;
+ 	vk.image_uploaded = VK_NULL_HANDLE;
+ #endif
++	// visionOS VR (patch 0009): the VR engine thread waits on the fence of the
++	// frame it last submitted, and that handle has just been destroyed. Forget it
++	// here or the next wait is on freed memory — which aborts the process inside
++	// MoltenVK's own mutex, on the far side of a vid_restart.
++	q3s_last_submit_fence = VK_NULL_HANDLE;
+ }
+ 
+ 
+@@ -4058,6 +4127,17 @@
+ 		vk.fboActive = qtrue;
+ 		if ( r_ext_multisample->integer ) {
+ 			vk.msaaActive = qtrue;
++		}
++		// visionOS VR (patch 0009): a multisampled depth attachment cannot be
++		// copied into the single-sample per-eye snapshot the compositor reads,
++		// and a resolved colour snapshot taken mid-frame is not valid either. VR
++		// therefore runs single-sample — enforced HERE rather than by overriding
++		// the player's r_ext_multisample, which is an ARCHIVED and LATCHED cvar:
++		// overriding it would write the override into their config the next time
++		// anything saved, and a latched cvar cannot even be read back reliably to
++		// stash it.
++		if ( vk_vr_wanted ) {
++			vk.msaaActive = qfalse;
+ 		}
+ 	} else {
+ 		vk.fboActive = qfalse;
+@@ -4478,6 +4558,13 @@
+ 			qvkDestroyImageView( vk.device, q3s_eye_image_view[i], NULL );
+ 			q3s_eye_image[i] = VK_NULL_HANDLE;
+ 			q3s_eye_image_view[i] = VK_NULL_HANDLE;
++		}
++		// visionOS VR (patch 0009): the per-eye depth snapshots, same lifetime.
++		if ( q3s_eye_depth[i] ) {
++			qvkDestroyImage( vk.device, q3s_eye_depth[i], NULL );
++			qvkDestroyImageView( vk.device, q3s_eye_depth_view[i], NULL );
++			q3s_eye_depth[i] = VK_NULL_HANDLE;
++			q3s_eye_depth_view[i] = VK_NULL_HANDLE;
+ 		}
+ 	}
+ 
+@@ -7717,6 +7804,10 @@
+ 
+ 	VK_CHECK( qvkQueueSubmit( vk.queue, 1, &submit_info, vk.cmd->rendering_finished_fence ) );
+ 	vk.cmd->waitForFence = qtrue;
++	// visionOS VR (patch 0009): remember which fence this submission signals, so
++	// the VR engine thread can wait for the per-eye snapshots inside it to have
++	// actually completed before it tells the compositor the pair is ready.
++	q3s_last_submit_fence = vk.cmd->rendering_finished_fence;
+ 
+ 	// presentation may take undefined time to complete, we can't measure it in a reliable way
+ 	backEnd.pc.msec = ri.Milliseconds() - backEnd.pc.msec;
+@@ -7839,6 +7930,100 @@
+ #endif
+ }
+ 
++// visionOS VR (patch 0009) shell interface.
++//
++// VK_Set3DVRWanted must be set before renderer init — it decides whether the
++// depth attachment is memoryless and whether the render pass keeps depth, both
++// of which are fixed at attachment/render-pass creation. VR entry performs a
++// vid_restart for the per-eye render extents anyway, so it rides that.
++//
++// The per-eye pose is published by the shell ON THE ENGINE THREAD, inside the
++// pose rendezvous, so these globals are only ever written by the thread that
++// reads them: the compositor thread hands its pair across the rendezvous lock,
++// and the engine thread copies it in here before Com_Frame.
++void VK_Set3DVRWanted( int on ) { vk_vr_wanted = on; }
++int  VK_Get3DVRWanted( void )   { return vk_vr_wanted; }
++void VK_SetVRActive( int on )   { vk_vr_active = on; }
++int  VK_GetVRActive( void )     { return vk_vr_active; }
++int  VK_GetVRExtentRefusals( void ) { return vk_vr_extent_refusals; }
++void VK_SetVRZNear( float z )   { if ( z > 0.0f ) vk_vr_znear = z; }
++
++void VK_SetVREye( int eye, const float offset[3], const float axis[9], const float tangents[4] )
++{
++	int i;
++	if ( eye < 0 || eye > 1 )
++		return;
++	// Refuse a degenerate frustum rather than install one: zeros arrive when the
++	// space never opened, and they reach the projection as a divide by a zero
++	// width. Keeping the previous (or the initial symmetric) set is always a
++	// better frame than NaN.
++	if ( !( tangents[1] > tangents[0] ) || !( tangents[3] > tangents[2] ) )
++		return;
++	for ( i = 0; i < 3; i++ )
++		vk_vr_eye_offset[eye][i] = offset[i];
++	for ( i = 0; i < 9; i++ )
++		vk_vr_eye_axis[eye][i / 3][i % 3] = axis[i];
++	for ( i = 0; i < 4; i++ )
++		vk_vr_eye_tangents[eye][i] = tangents[i];
++	vk_vr_eye_index = eye;
++}
++
++// Per-eye DEPTH snapshot as a Metal texture, re-resolved on every call for the
++// same reason the colour accessor is: a vid_restart recreates the images and a
++// cached pointer would be stale.
++void *VK_Get3DEyeDepthMTLTexture( int idx )
++{
++#ifdef Q3E_MVK_BRIDGE
++	void *mtlTexture = NULL;
++	if ( idx < 0 || idx > 1 || q3s_eye_depth[idx] == VK_NULL_HANDLE )
++		return NULL;
++	vkGetMTLTextureMVK( q3s_eye_depth[idx], &mtlTexture );
++	return mtlTexture;
++#else
++	return NULL;
++#endif
++}
++
++// Wait for the frame just submitted to have COMPLETED on the GPU.
++//
++// The compositor copies the per-eye snapshots on its own Metal queue, which is
++// not synchronised with the engine's; "the engine returned from Com_Frame" only
++// means the work was SUBMITTED. Without this the compositor can copy an eye
++// image the GPU is still writing — torn eyes, or a colour/depth pair from two
++// different frames. Called by the VR engine thread immediately before it
++// releases the rendezvous, so the wait replaces idle time the next frame's
++// begin_frame would have spent on the same fence rather than adding to it.
++void VK_WaitLastFrameGPU( void )
++{
++	// vk.device is checked too: between a renderer teardown and the next init
++	// there is no device to wait on, and the VR engine thread keeps running
++	// across exactly that window (it is what executes the restart).
++	if ( !vk_vr_active || vk.device == VK_NULL_HANDLE || q3s_last_submit_fence == VK_NULL_HANDLE )
++		return;
++	qvkWaitForFences( vk.device, 1, &q3s_last_submit_fence, VK_TRUE, 1000000000ULL );
++}
++
++int VK_Get3DDepthCopies( void ) { return q3s_depth_copies; }
++
++// The sample count the renderer actually built its attachments with. VR forces
++// single-sample; reporting the number the RENDERER used is what makes that
++// assertable, rather than the cvar it was asked to ignore.
++int VK_GetSampleCount( void ) { return (int)vkSamples; }
++
++// The bottom/top tangents recovered from the finished cull planes, so the shell
++// can assert that each plane is attached to the edge it is supposed to be.
++void VK_GetVRCullTangents( int eye, float out[2] )
++{
++	if ( eye < 0 || eye > 1 )
++		return;
++	out[0] = vk_vr_cull_tangents[eye][0];
++	out[1] = vk_vr_cull_tangents[eye][1];
++}
++int VK_Get3DDepthLive( void )
++{
++	return ( q3s_eye_depth[0] != VK_NULL_HANDLE && q3s_eye_depth[1] != VK_NULL_HANDLE ) ? 1 : 0;
++}
++
+ // GPU-side per-eye snapshot: copy the finished field out of color_image, in-order on
+ // the render queue. Called OUTSIDE a render pass only — at the L/R field boundary
+ // (RB_DrawBuffer, which ends/restarts the main pass around it) and after the final
+@@ -7873,6 +8058,40 @@
+ 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 0 );
+ 	record_image_layout_transition( vk.cmd->command_buffer, vk.color_image, VK_IMAGE_ASPECT_COLOR_BIT,
+ 		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 0 );
++
++	// visionOS VR (patch 0009): the matching DEPTH copy, at the same boundary and
++	// on the same queue, so a pair is colour and depth of the SAME field. The
++	// depth attachment rests in DEPTH_STENCIL_ATTACHMENT_OPTIMAL between passes
++	// (it is the pass's final layout) and now survives it, because VR builds it
++	// non-transient with storeOp STORE.
++	if ( vk_vr_wanted && q3s_eye_depth[idx] != VK_NULL_HANDLE && vk.depth_image != VK_NULL_HANDLE ) {
++		// A barrier on a combined depth/stencil image has to name BOTH aspects
++		// (the layouts used here are not the separate-aspect ones); the COPY
++		// below moves depth only, which is what the compositor reads.
++		const VkImageAspectFlags dsAspect = VK_IMAGE_ASPECT_DEPTH_BIT |
++			( glConfig.stencilBits > 0 ? VK_IMAGE_ASPECT_STENCIL_BIT : 0 );
++		record_image_layout_transition( vk.cmd->command_buffer, vk.depth_image, dsAspect,
++			VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 0 );
++		record_image_layout_transition( vk.cmd->command_buffer, q3s_eye_depth[idx], dsAspect,
++			VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 0 );
++
++		Com_Memset( &region, 0, sizeof( region ) );
++		region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
++		region.srcSubresource.layerCount = 1;
++		region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
++		region.dstSubresource.layerCount = 1;
++		region.extent.width = glConfig.vidWidth;
++		region.extent.height = glConfig.vidHeight;
++		region.extent.depth = 1;
++		qvkCmdCopyImage( vk.cmd->command_buffer, vk.depth_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++			q3s_eye_depth[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
++
++		record_image_layout_transition( vk.cmd->command_buffer, q3s_eye_depth[idx], dsAspect,
++			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 0, 0 );
++		record_image_layout_transition( vk.cmd->command_buffer, vk.depth_image, dsAspect,
++			VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 0, 0 );
++		q3s_depth_copies++;
++	}
+ }
+ 
+ // The engine's MoltenVK MTLCommandQueue. The immersive compositor renders on THIS same
+--- a/code/client/snd_main.c
++++ b/code/client/snd_main.c
+@@ -208,6 +208,21 @@
+ 		vec3_t axis[3], int inwater )
+ {
+ 	if( si.Respatialize ) {
++		// visionOS VR (overlay patch 0009): while a VR world frame is active the
++		// listener follows the HEAD, not the game's view axis. cgame hands us the
++		// AIM basis, and in VR aim and gaze are different things — panning that
++		// follows the gun makes the whole room swing whenever the player looks
++		// around without turning. The origin is unchanged: sounds are placed
++		// relative to the player, and the player has not moved.
++		if ( s_vrListenerActive ) {
++			vec3_t vrAxis[3];
++			int i, j;
++			for ( i = 0; i < 3; i++ )
++				for ( j = 0; j < 3; j++ )
++					vrAxis[i][j] = s_vrListenerAxis[i][j];
++			si.Respatialize( entityNum, origin, vrAxis, inwater );
++			return;
++		}
+ 		si.Respatialize( entityNum, origin, axis, inwater );
+ 	}
+ }
+@@ -215,6 +230,32 @@
+ 
+ /*
+ =================
++S_SetVRListenerAxis
++
++Published by the visionOS shell once per frame while a VR world frame is being
++built, and cleared on VR exit. It lives here rather than in the renderer because
++the sound code is linked into every build, including the ones that do not
++compile a Vulkan renderer at all.
++=================
++*/
++int   s_vrListenerActive = 0;
++float s_vrListenerAxis[3][3];
++
++void S_SetVRListenerAxis( int active, const float axis[9] )
++{
++	int i;
++	if ( active && axis ) {
++		for ( i = 0; i < 9; i++ )
++			s_vrListenerAxis[i / 3][i % 3] = axis[i];
++		s_vrListenerActive = 1;
++	} else {
++		s_vrListenerActive = 0;
++	}
++}
++
++
++/*
++=================
+ S_UpdateEntityPosition
+ =================
+ */
+--- a/code/client/snd_public.h
++++ b/code/client/snd_public.h
+@@ -49,6 +49,12 @@
+ // relative to the given entityNum / orientation
+ void S_Respatialize( int entityNum, const vec3_t origin, vec3_t axis[3], int inwater );
+ 
++// visionOS VR (overlay patch 0009): substitute the head basis for cgame's aim
++// basis while a VR world frame is active, so the listener follows the head.
++extern int   s_vrListenerActive;
++extern float s_vrListenerAxis[3][3];
++void S_SetVRListenerAxis( int active, const float axis[9] );
++
+ // let the sound system know where an entity currently is
+ void S_UpdateEntityPosition( int entityNum, const vec3_t origin );
+ 

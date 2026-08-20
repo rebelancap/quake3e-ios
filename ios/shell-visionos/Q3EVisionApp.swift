@@ -14,27 +14,43 @@ import AVFAudio
 // finding: entering the space leaves sound spatialized at the old window position).
 // .headTracked + .front keeps the soundstage in front of the user — where the panel
 // is; restored to the automatic window-anchored experience on exit.
-private func q3eSetSpatialAudio(immersive: Bool) {
+// Mode 2 (VR) is `.bypassed`: in VR the ENGINE head-pans its own audio (the
+// listener follows the head pose), so a second head-tracked spatialisation on
+// top of it would pan an already-panned mix.
+@_cdecl("Q3E_SetSpatialAudioMode")
+func Q3E_SetSpatialAudioMode(_ mode: Int32) {
     do {
         let session = AVAudioSession.sharedInstance()
-        if immersive {
+        switch mode {
+        case 2:
+            try session.setIntendedSpatialExperience(.bypassed)
+        case 1:
             try session.setIntendedSpatialExperience(
                 .headTracked(soundStageSize: .large, anchoringStrategy: .front))
-        } else {
+        default:
             try session.setIntendedSpatialExperience(
                 .headTracked(soundStageSize: .automatic, anchoringStrategy: .automatic))
         }
-        Q3E_BlackBox_Str("Swift: spatial audio -> \(immersive ? "front (3D)" : "automatic (2D)")")
+        Q3E_BlackBox_Str("Swift: spatial audio -> \(mode == 2 ? "bypassed (VR)" : (mode == 1 ? "front (3D)" : "automatic (2D)"))")
     } catch {
         NSLog("Q3E-VISION Swift: setIntendedSpatialExperience failed: \(error)")
         Q3E_BlackBox_Str("Swift: spatial audio FAILED: \(error.localizedDescription)")
     }
 }
 
+
+
 // Shared bridge the ObjC/C side pokes to open/close the 3D immersive space.
 final class Q3EAppModel: ObservableObject {
     static let shared = Q3EAppModel()
-    @Published var immersive = false
+    @Published var immersive = false   // the 3D panel space
+    @Published var vr = false          // the full-immersion VR space
+    // R4.3 item 1 (donor parity: "Show Hands"). The VR space's
+    // .upperLimbVisibility was a compile-time constant; a scene modifier can
+    // only be moved by re-evaluating the scene, so the value has to live on the
+    // one observable object the App already watches. false == .hidden, which is
+    // what every build up to 1.0.4.14 shipped.
+    @Published var showHands = false
 }
 
 // Called from the (shared) settings toggle to switch between 2D window and 3D
@@ -42,6 +58,28 @@ final class Q3EAppModel: ObservableObject {
 @_cdecl("Q3E_SetImmersiveMode")
 func Q3E_SetImmersiveMode(_ on: Bool) {
     DispatchQueue.main.async { Q3EAppModel.shared.immersive = on }
+}
+
+// Same, for the VR space. Both spaces are declared in the App below; only one
+// can be open at a time, which is why the mode machine sequences a direct
+// 3D<->VR switch as dismiss-then-open.
+@_cdecl("Q3E_SetVRSpace")
+func Q3E_SetVRSpace(_ on: Bool) {
+    DispatchQueue.main.async { Q3EAppModel.shared.vr = on }
+}
+
+// R4.3 item 1. The settings row's applier, from ObjC. Applied while the space is
+// OPEN as well as before it opens: the modifier is part of the scene's body, so
+// publishing a new value re-evaluates it and visionOS takes the change live —
+// which is the whole point of a comfort row (a setting that needs a VR exit to
+// take effect is a setting nobody changes in the headset).
+@_cdecl("Q3E_VR_SetShowHands")
+func Q3E_VR_SetShowHands(_ on: Bool) {
+    DispatchQueue.main.async {
+        guard Q3EAppModel.shared.showHands != on else { return }
+        Q3EAppModel.shared.showHands = on
+        Q3E_BlackBox_Str("Swift: upper-limb visibility -> \(on ? "visible" : "hidden")")
+    }
 }
 
 // Hosts the UIKit engine view controller (the 2D window) inside SwiftUI.
@@ -118,7 +156,12 @@ struct Q3ERootView: View {
                 // tuned with live feedback on the panel.
                 HStack(spacing: 16) {
                     Button(model.immersive ? "Exit" : "3D") {
-                        Q3E_Enter3D(!model.immersive)   // gw_minimized before the space opens
+                        // Q3E_EnterMode is the single owner of every transition;
+                        // it handles a direct 3D<->VR switch as dismiss-then-open.
+                        Q3E_EnterMode(model.immersive ? 0 : 1)
+                    }
+                    Button(model.vr ? "Exit VR" : "VR") {
+                        Q3E_EnterMode(model.vr ? 0 : 2)
                     }
                     Button { showSettings = true } label: {
                         Image(systemName: "gearshape.fill")
@@ -142,11 +185,47 @@ struct Q3ERootView: View {
                         let r = await openImmersiveSpace(id: "Q3E3D")
                         NSLog("Q3E-VISION Swift: openImmersiveSpace -> \(String(describing: r))")
                         Q3E_BlackBox_Str("Swift: openImmersiveSpace -> \(r)")
-                        q3eSetSpatialAudio(immersive: true)    // sound follows the panel
+                        Q3E_AssertModePolicy()             // the MODE decides, not this Task
                     } else {
                         await dismissImmersiveSpace()
-                        q3eSetSpatialAudio(immersive: false)   // back to the window
                         Q3E_BlackBox_Str("Swift: dismissed immersive")
+                        // NOT an unconditional "back to the window": by the time
+                        // this completion runs the mode may already be VR, and
+                        // writing mode 0 here leaves the whole VR session
+                        // double-panned. Re-assert whatever the mode is NOW.
+                        Q3E_AssertModePolicy()
+                    }
+                }
+            }
+            // The VR space. Open/dismiss MUST go through the SwiftUI environment
+            // action: calling from a UIKit context works in 2D and silently fails
+            // over an open space. The exit finalize runs in the DISMISSAL
+            // COMPLETION — stop the render thread, wait, dismiss, then finalize;
+            // any other order produces a wedge.
+            .onChange(of: model.vr) { _, on in
+                NSLog("Q3E-VISION Swift: vr onChange -> \(on)")
+                Task {
+                    if on {
+                        Q3E_BlackBox_Str("Swift: calling openImmersiveSpace(Q3EVR)")
+                        let r = await openImmersiveSpace(id: "Q3EVR")
+                        Q3E_BlackBox_Str("Swift: openImmersiveSpace(Q3EVR) -> \(r)")
+                        // A refused open is not a warning to log and carry on
+                        // from: nothing will ever publish an eye pose, so the
+                        // entry would commit on its timeout, park the window
+                        // behind a curtain, and leave the player looking at
+                        // their own room with no way back.
+                        if r != .opened {
+                            model.vr = false
+                            Q3E_VR_OpenFailed()
+                        }
+                    } else {
+                        await dismissImmersiveSpace()
+                        Q3E_BlackBox_Str("Swift: dismissed VR space")
+                        Q3E_ExitVRFinalize()
+                        // The mode owns the audio experience, not this
+                        // completion: a 3D<->VR switch has one space's dismissal
+                        // racing the other's entry.
+                        Q3E_AssertModePolicy()
                     }
                 }
             }
@@ -155,6 +234,10 @@ struct Q3ERootView: View {
 
 @main
 struct Q3EVisionApp: App {
+    // R4.3 item 1: the App observes the same shared model the root view does, so
+    // the VR space's upper-limb modifier below is a value rather than a literal.
+    @ObservedObject private var model = Q3EAppModel.shared
+
     var body: some Scene {
         WindowGroup {
             Q3ERootView()
@@ -177,5 +260,24 @@ struct Q3EVisionApp: App {
         // drawable clears to alpha 0 and the in-scene dim layer ("Dim surroundings"
         // slider) darkens the room continuously; 100% is the old full-immersion void.
         .immersionStyle(selection: .constant(.mixed), in: .mixed)
+
+        // VR: a SEPARATE space, because the immersion style set is fixed per space
+        // at compile time and one space cannot express both. FULL immersion — the
+        // player is inside the level, not looking at it.
+        ImmersiveSpace(id: "Q3EVR") {
+            CompositorLayer(configuration: Q3ECompositorConfiguration()) { layerRenderer in
+                Q3E_BlackBox_Str("Swift: VR CompositorLayer entered — spawning render thread")
+                let renderThread = Thread { Q3E_VR_Run(layerRenderer) }
+                renderThread.name = "Q3E-VR"
+                renderThread.stackSize = 2 << 20
+                renderThread.start()
+            }
+        }
+        .immersionStyle(selection: .constant(.full), in: .full)
+        // R4.3 item 1: hidden by default — full immersion means the player is
+        // inside the level, and a pair of real forearms in front of a Quake gun
+        // is the first thing that breaks it. The row exists because the donor
+        // ships it: some players want their hands while they find a controller.
+        .upperLimbVisibility(model.showHands ? .visible : .hidden)
     }
 }

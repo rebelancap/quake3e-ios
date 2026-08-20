@@ -20,7 +20,19 @@ for R in gl vk; do
     vk) RD=vulkan ;;
   esac
   echo "== building oracle-$R (RENDERER_DEFAULT=$RD)"
-  make -C build/src-overlay release BUILD_DIR="$ROOT/build/oracle-$R" RENDERER_DEFAULT=$RD -j"$JOBS" > "$ROOT/build/oracle-$R-make.log" 2>&1 \
+  # HEADER DEPENDENCIES. The Makefile compiles with -MMD and then includes
+  #   D_FILES=$(shell find . -name '*.d')
+  # which is relative to the SOURCE directory — and our BUILD_DIR is outside it,
+  # so that find matches nothing and every header dependency is silently lost.
+  # A header-only change then relinks stale objects built against the OLD struct
+  # layouts, and the result is a binary that segfaults on the first rendered
+  # frame while every compile step reported success. Feed the variable the real
+  # list (a command-line assignment overrides the Makefile's).
+  DEPS=""
+  if [ -d "$ROOT/build/oracle-$R" ]; then
+    DEPS=$(find "$ROOT/build/oracle-$R" -name '*.d' | tr '\n' ' ')
+  fi
+  make -C build/src-overlay release BUILD_DIR="$ROOT/build/oracle-$R" RENDERER_DEFAULT=$RD D_FILES="$DEPS" -j"$JOBS" > "$ROOT/build/oracle-$R-make.log" 2>&1 \
     || { echo "FATAL: make failed for oracle-$R — tail of log:"; tail -30 "$ROOT/build/oracle-$R-make.log"; exit 1; }
   BIN="$ROOT/build/oracle-$R/release-darwin-aarch64/quake3e.aarch64"
   [ -x "$BIN" ] || { echo "FATAL: $BIN not produced"; exit 1; }

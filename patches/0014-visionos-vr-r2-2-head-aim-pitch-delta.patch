@@ -1,0 +1,125 @@
+--- a/code/client/cl_input.c
++++ b/code/client/cl_input.c
+@@ -723,6 +723,24 @@
+ // see that frame's intentional absolute pitch write as a spike — see the
+ // clamp's own comment.
+ int   cl_vr_head_aim_first_frame = 0;
++// R2.2 fix 3: the pitch this function is trying to make EFFECTIVE (what pmove
++// computes from the usercmd plus the playerstate's own delta_angles), after
++// the engine's own pitch limit. Published rather than recomputed elsewhere
++// because it is the only honest thing to compare the server's effective pitch
++// against — the raw accumulator differs from it by the delta, which is the
++// entire point of the compensation below.
++float cl_vr_head_pitch_target = 0.0f;
++// Fault injection (`q3evrpitchcomp 0`): drop the delta compensation and write
++// the head pitch absolutely, the way this hook did before R2.2. That is the
++// state in which the effective-pitch identity measurably opens after a
++// respawn, which is what proves the assertion is testing something.
++int   cl_vr_head_pitch_delta_enabled = 1;
++// SHORT2ANGLE(16000), spelled out: the exact pitch limit PM_UpdateViewAngles
++// enforces on the effective view angle. Not a rounded-down "about 87" —
++// clamping SHORT of the engine's own limit would cost aim the game does allow,
++// and clamping past it would put the compensation into a fight with the
++// server's clamp (which rewrites delta_angles every time it fires).
++#define Q3E_VR_PITCH_LIMIT_DEG 87.890625f
+ 
+ /*
+ =================
+@@ -746,18 +764,61 @@
+ Pitch and roll are the head's alone (roll is not a meaningful aim axis in this
+ game and is left at 0); yaw is body + head so turning the body (stick) and
+ turning the head (looking around) compose instead of one erasing the other.
++
++R2.2 fix 3 — PITCH IS NOT AN ABSOLUTE WRITE. What the game aims at is not
++cl.viewangles: pmove computes the effective view as the usercmd's angles PLUS
++the playerstate's delta_angles, and the server rewrites delta_angles on every
++forced view snap (SetClientViewAngle: each respawn, teleport and intermission
++exit). The YAW path is immune to that by construction — the RENDER takes its
++yaw from the same effective angles the aim does (R_VRComposeEye builds a
++yaw-only body basis out of the game's own view), so a constant added to both
++turns the player's whole world and aim together and nothing diverges. PITCH
++has no such symmetry: the render takes pitch from the PUBLISHED EYE AXES, i.e.
++the physical head alone, so any delta_angles[PITCH] the server installs lands
++on the aim and not on the gaze. Dying while pitched down 30 degrees is enough
++to open it, and it then stays open for the whole next life: shots land 30
++degrees off the crosshair the player is looking through. The write below
++therefore aims at an EFFECTIVE pitch and subtracts the server's own offset,
++in the same 16-bit circular domain pmove adds it back in.
+ =================
+ */
+ static void CL_VRApplyHeadAim( void )
+ {
+ 	static float lastSent = 0.0f;
+ 	static int   yawInit = 1;
+-	float delta;
++	static int   lastDeltaPitch = 0;
++	float delta, target;
++	int   deltaPitch;
++
++	// Quake cannot aim past its own pitch limit: PM_UpdateViewAngles clamps the
++	// EFFECTIVE pitch at +/-16000 short units (87.89 degrees) and REWRITES
++	// delta_angles when it does — so a head tipped further than that would make
++	// the compensation below chase an offset the server keeps moving, one
++	// clamp's worth per frame, forever. Clamped to the limit here instead: the
++	// last couple of degrees of straight-up and straight-down are angles this
++	// game has never been able to aim at, and the gaze leading the aim there is
++	// honest, where an integrator would not be.
++	target = cl_vr_head_pitch;
++	if ( target < -Q3E_VR_PITCH_LIMIT_DEG )
++		target = -Q3E_VR_PITCH_LIMIT_DEG;
++	else if ( target > Q3E_VR_PITCH_LIMIT_DEG )
++		target = Q3E_VR_PITCH_LIMIT_DEG;
++	// Published unconditionally — including on the disabled paths below, so the
++	// dump that reads it is measuring the same thing whether the hook is on,
++	// off, or uncompensated.
++	cl_vr_head_pitch_target = target;
+ 
+ 	if ( !cl_vr_head_aim_active || !cl_vr_head_aim_hook_enabled ) {
+ 		yawInit = 1;   // re-arm: the next activation re-seeds from where aim is
+ 		return;
+ 	}
++
++	// The server's own offset, straight from the last snapshot. delta_angles is
++	// networked as 16 bits, so its SIGN on this side means nothing; only its
++	// value modulo 65536 does, which is exactly how it is used below.
++	deltaPitch = 0;
++	if ( cl_vr_head_pitch_delta_enabled && cls.state == CA_ACTIVE && cl.snap.valid )
++		deltaPitch = cl.snap.ps.delta_angles[PITCH];
+ 
+ 	if ( yawInit ) {
+ 		// First head-aim frame (VR entry, or a mode re-arm): the body adopts
+@@ -776,8 +837,19 @@
+ 		// cannot tell that apart from a real spike on its own; this flag is
+ 		// how it is told, for exactly one frame.
+ 		cl_vr_head_aim_first_frame = 1;
++		lastDeltaPitch = deltaPitch;
+ 	}
+ 
++	// A CHANGED delta means the server just moved the pitch reference (a
++	// respawn, a teleport). The pitch write below then jumps by the whole
++	// change in one frame — deliberately, to keep the effective pitch where
++	// the head is — and that is not a tracking spike either, so it is told to
++	// the wrap-clamp through the same one-frame flag the first activation uses.
++	if ( deltaPitch != lastDeltaPitch ) {
++		cl_vr_head_aim_first_frame = 1;
++		lastDeltaPitch = deltaPitch;
++	}
++
+ 	// Whatever this frame's turn/mouse/touch/spawn-snap path did to the yaw
+ 	// since the last head-aim frame, folded into the body rather than lost
+ 	// under the head's own absolute write below.
+@@ -790,7 +862,13 @@
+ 	cl_vr_body_yaw = AngleMod( cl_vr_body_yaw + delta );
+ 
+ 	cl.viewangles[YAW]   = AngleMod( cl_vr_body_yaw + cl_vr_head_yaw );
+-	cl.viewangles[PITCH] = cl_vr_head_pitch;
++	// The short cast is the engine's own idiom for this arithmetic (pmove adds
++	// the two back together into a `short` for the same reason): the sum wraps
++	// modulo 65536 on both sides, so cmd->angles[PITCH] + delta_angles[PITCH]
++	// reconstructs the target exactly, whatever sign convention either half
++	// arrived in. Kept in the +/-180 degree window a short maps to, so the
++	// value the wrap-clamp below sees is never a wrapped 300-degree jump.
++	cl.viewangles[PITCH] = SHORT2ANGLE( (short)( ANGLE2SHORT( target ) - deltaPitch ) );
+ 	cl.viewangles[ROLL]  = 0.0f;
+ 	lastSent = cl.viewangles[YAW];
+ }

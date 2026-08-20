@@ -70,6 +70,25 @@ void Q3E_Shell_SetFPSCounter(int enabled) {
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
+
+    // A UIKit overlay is INVISIBLE to an engine screenshot (charter rule 6), so
+    // the label reports its own geometry — logged only when it actually changes,
+    // which keeps it out of a measured run.
+    if (q3e_fpsLabel) {
+        static CGPoint lastFpsOrigin = { -1.0, -1.0 };
+        CGRect f = q3e_fpsLabel.frame;
+        // ORIGIN only: the label's WIDTH changes every time the digit count does,
+        // and logging on that would print twice a second for the whole of a
+        // measured run (charter: nothing logs inside one). Placement is the claim.
+        if (!CGPointEqualToPoint(f.origin, lastFpsOrigin)) {
+            lastFpsOrigin = f.origin;
+            UIEdgeInsets si = self.view.safeAreaInsets;
+            NSLog(@"Q3E-GEOM fps label frame=%.1f,%.1f %.1fx%.1f view=%.0fx%.0f safeAreaLeft=%.1f",
+                  f.origin.x, f.origin.y, f.size.width, f.size.height,
+                  self.view.bounds.size.width, self.view.bounds.size.height, si.left);
+        }
+    }
+
     if (self.booted) return;
 
     CGSize sz = self.view.bounds.size;
@@ -148,10 +167,22 @@ void Q3E_Shell_SetFPSCounter(int enabled) {
     q3e_fpsLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:q3e_fpsLabel];
     CGFloat topInset = MIN(self.view.safeAreaInsets.top, 20.0);
+    // The desired position is a preference, not a requirement, so that the
+    // required on-screen clamp below can win WITHOUT an unsatisfiable-constraint
+    // break on a device whose landscape safe-area inset is 0.
+    NSLayoutConstraint *fpsLead =
+        [q3e_fpsLabel.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:-2];
+    fpsLead.priority = UILayoutPriorityDefaultHigh;
     [NSLayoutConstraint activateConstraints:@[
         [q3e_fpsLabel.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:topInset + 6],
-        // top-LEFT now (the ≡ menu button moved to the top-right)
-        [q3e_fpsLabel.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:12],
+        // top-LEFT now (the ≡ menu button moved to the top-right). Nudged 14 pt
+        // further left than the old +12 (user request) — it now sits just OUTSIDE
+        // the safe-area edge, which in landscape is ~60 pt in from the physical
+        // edge, and above the vertical band the Dynamic Island occupies. The
+        // hard clamp below is what keeps a device with a different (or zero)
+        // landscape inset from pushing the digits off-screen.
+        fpsLead,
+        [q3e_fpsLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:4],
     ]];
 
     Q3E_Settings_ApplyAll();

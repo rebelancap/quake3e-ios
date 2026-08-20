@@ -22,6 +22,8 @@ QUESTIONS.md
 FABLE_3D*.md
 NOTES-FROM-VKQUAKE.md
 PUBLISH-GUIDE-FROM-VKQUAKE.md
+VR-PORTING-FROM-VKQUAKE.md
+docs/VR-*.md
 docs/pacing-design.md
 docs/upstream-map.md
 docs/upstream-pr-0002.md
@@ -37,5 +39,16 @@ ios/Quake3e-sim.xcodeproj/
 # scratch — user screenshots etc, never part of the repo
 tmp/
 
+# third-party game data staged for the mods round — big, free, re-fetchable.
+# The provenance records stay tracked; the payload never does.
+work/*
+!work/*-PROVENANCE.md
+
+# local game-data inventory — personal paths, never published
+gamedata-PROVENANCE.md
+
 # local device identifiers — personal data, never committed
 scripts/device.local.sh
+
+# python bytecode from the helper scripts
+scripts/__pycache__/

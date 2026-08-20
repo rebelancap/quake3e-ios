@@ -1,0 +1,33 @@
+--- a/code/renderervk/vk.c
++++ b/code/renderervk/vk.c
+@@ -3372,6 +3372,12 @@
+ int vk_vr_alpha_blended[2]  = { -1, -1 };
+ int vk_vr_alpha_additive[2] = { -1, -1 };
+ int vk_vr_swallowed2D = 0;                   // right-field 2D streams discarded
++// TEST HOOK. Stops the 2D stream from being separated out, which is exactly the
++// state a frame with no 2D in it produces: no split, no snapshot, a UI layer
++// that stops advancing. It exists because the obvious way to produce that state
++// from outside — turning the HUD off with cg_draw2D — does NOT stop the stream,
++// so a test built on it was asserting against a premise that is false.
++int vk_vr_ui_stall = 0;
+ void vk_vr_ui_snapshot( void );
+ void vk_vr_ui_split( void );
+ void vk_vr_ui_field( int field );
+@@ -8171,6 +8177,8 @@
+ 
+ int VK_GetVRUIFrames( void ) { return vk_vr_ui_frames; }
+ int VK_GetVRSwallowed2D( void ) { return vk_vr_swallowed2D; }
++void VK_SetVRUIStall( int on ) { vk_vr_ui_stall = on ? 1 : 0; }
++int  VK_GetVRUIStall( void ) { return vk_vr_ui_stall; }
+ void VK_GetVRUIAlpha( int *blended, int *additive )
+ {
+ 	if ( blended )  { blended[0] = vk_vr_alpha_blended[0];  blended[1] = vk_vr_alpha_blended[1]; }
+@@ -8323,6 +8331,8 @@
+ 	const int f = ( q3s_field == 2 ) ? 1 : 0;
+ 
+ 	if ( !vk_vr_active || !vk_vr_ui_redirect || q3s_ui_image == VK_NULL_HANDLE )
++		return;
++	if ( vk_vr_ui_stall )
+ 		return;
+ 	if ( q3s_field != 1 && q3s_field != 2 )
+ 		return;

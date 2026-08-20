@@ -2,5 +2,6 @@
 // (Q3EVisionApp.swift).
 #import "AppShell_vision.h"
 #import "Q3EImmersive.h"
+#import "Q3EVR.h"
 #import "Q3EBlackBox.h"
 #import "ios_settings.h"   // Q3ESettingsController for the SwiftUI settings sheet

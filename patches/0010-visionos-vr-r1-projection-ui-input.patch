@@ -1,0 +1,646 @@
+--- a/code/renderervk/vk.c
++++ b/code/renderervk/vk.c
+@@ -3322,12 +3322,41 @@
+ float vk_vr_eye_axis[2][3][3];               // body-frame eye basis, Q3 convention
+ float vk_vr_eye_tangents[2][4];              // left, right, bottom, top
+ float vk_vr_cull_tangents[2][2];             // what the cull planes encode (measured)
++float vk_vr_edge_ndc[2][4];                  // where the FINISHED projection puts the
++                                             // requested edges: l, r, b, t in NDC
+ static VkImage     q3s_eye_depth[2];         // per-eye DEPTH snapshots
+ static VkImageView q3s_eye_depth_view[2];
+ static int         q3s_depth_copies = 0;
+ static VkFence     q3s_last_submit_fence = VK_NULL_HANDLE;
+ 
++// visionOS VR (patch 0010): the 2D redirect. Quake 3's HUD, scoreboard, chat and
++// console are a flat 2D command stream drawn into whatever the scene was drawn
++// into — so in stereo they land in BOTH eye buffers at screen parallax, which is
++// what puts two crosshairs and a doubled scoreboard in the world. In a VR world
++// frame the stream is instead separated out: the eye snapshot is taken at the
++// moment 2D begins (so the eyes carry the world and nothing else), the colour
++// attachment is cleared TRANSPARENT, the 2D draws onto it, and the result is
++// snapshotted as a UI layer the compositor shows as one head-locked panel.
++//
++// Nothing here needs a second render pass, a second pipeline or a second
++// attachment format: the split is entirely a question of WHEN the existing
++// snapshot is taken and what the surface holds underneath. That matters because
++// the 2D pipelines are built against the main render pass, and a UI pass would
++// have had to stay render-pass-compatible with it forever.
++int vk_vr_ui_redirect = 0;                   // shell: this frame is a VR WORLD frame
++int vk_vr_ui_frames = 0;                     // UI layer snapshots taken (freshness)
++static VkImage     q3s_ui_image = VK_NULL_HANDLE;
++static VkImageView q3s_ui_image_view = VK_NULL_HANDLE;
++static int         q3s_field = 0;            // 1 = left field, 2 = right field
++static int         q3s_ui_split[2];          // did the 2D split happen, per field
++static int         q3s_world_drawn[2];       // did a world view draw, per field
++void vk_vr_ui_snapshot( void );
++void vk_vr_ui_split( void );
++void vk_vr_ui_field( int field );
++void vk_vr_ui_world_drawn( void );
++int  vk_vr_ui_field_split( int field );
+ 
++
+ static void vk_alloc_attachments( void )
+ {
+ 	VkImageViewCreateInfo view_desc;
+@@ -3631,6 +3660,16 @@
+ 					&q3s_eye_depth[1], &q3s_eye_depth_view[1], qfalse,
+ 					VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT );
+ 			}
++
++			// visionOS VR (patch 0010): the UI layer. Same format and extent as
++			// colour_image because it is a straight vkCmdCopyImage of it, and it
++			// rides the pooled attachment allocation with the rest — a lazily
++			// created image here is the trap patch 0007 documented.
++			if ( vk_vr_wanted ) {
++				create_color_attachment( glConfig.vidWidth, glConfig.vidHeight, VK_SAMPLE_COUNT_1_BIT, vk.color_format,
++					VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &q3s_ui_image, &q3s_ui_image_view,
++					VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, qfalse );
++			}
+ 		}
+ 
+ 		// screenmap-msaa
+@@ -4566,6 +4605,14 @@
+ 			q3s_eye_depth[i] = VK_NULL_HANDLE;
+ 			q3s_eye_depth_view[i] = VK_NULL_HANDLE;
+ 		}
++	}
++
++	// visionOS VR (patch 0010): the UI layer image, same lifetime as the rest.
++	if ( q3s_ui_image ) {
++		qvkDestroyImage( vk.device, q3s_ui_image, NULL );
++		qvkDestroyImageView( vk.device, q3s_ui_image_view, NULL );
++		q3s_ui_image = VK_NULL_HANDLE;
++		q3s_ui_image_view = VK_NULL_HANDLE;
+ 	}
+ 
+ 	if ( vk.msaa_image ) {
+@@ -6933,9 +6980,45 @@
+ 		Com_Memcpy( proj, p, 64 );
+ 
+ 		// update q3's proj matrix (opengl) to vulkan conventions: z - [0, 1] instead of [-1, 1] and invert y direction
++		//
++		// Inverting Y means negating the matrix row that produces clip.y — in this
++		// column-major layout, indices 1, 5, 9 and 13. Only [5] was negated here,
++		// which was exactly right for as long as the other three were always zero:
++		// [1] and [13] are hardcoded to 0 in R_SetupProjection, and [9] is the
++		// vertical off-centre term, commented there as "normally 0".
++		//
++		// It is NOT zero for a head-mounted display. Each eye's frustum is
++		// off-centre in BOTH axes, and leaving [9] un-negated renders the world
++		// through a vertically MIRRORED off-centre term: a projection that no
++		// longer matches the one the compositor believes the frame was drawn with.
++		// While the head is still that is a small fixed offset the eye adapts to;
++		// the moment the head moves, the compositor reprojects against a projection
++		// the frame does not have, and the error is depth-dependent — which is the
++		// "swims when I move, fine when I hold still" warp, plus fringing at the
++		// depth discontinuities where the error changes fastest.
++		//
++		// Outside VR [9] is 0, so this negation is a no-op there (-0.0f differs
++		// from 0.0f in no arithmetic that reaches a pixel).
+ 		proj[5] = -p[5];
++		proj[9] = -p[9];
+ 		//proj[10] = ( p[10] - 1.0f ) / 2.0f;
+ 		//proj[14] = p[14] / 2.0f;
++#ifdef USE_VULKAN
++		// Publish where the FINISHED projection actually puts the four frustum
++		// edges that were asked for, in the convention the GPU will use. Asserting
++		// the tangents that went IN proves nothing about the matrix that comes out
++		// — this bug lived entirely in the conversion between them. A correct
++		// projection puts the requested left edge at NDC x = -1, right at +1,
++		// bottom at y = +1 and top at y = -1 (Vulkan's Y runs down).
++		if ( backEnd.viewParms.vrView ) {
++			const int eye = ( backEnd.viewParms.vrEye == 1 ) ? 1 : 0;
++			const float *t = vk_vr_eye_tangents[eye];
++			vk_vr_edge_ndc[eye][0] = proj[0] * t[0] - proj[8];
++			vk_vr_edge_ndc[eye][1] = proj[0] * t[1] - proj[8];
++			vk_vr_edge_ndc[eye][2] = proj[5] * t[2] - proj[9];
++			vk_vr_edge_ndc[eye][3] = proj[5] * t[3] - proj[9];
++		}
++#endif
+ 		myGlMultMatrix( vk_world.modelview_transform, proj, mvp );
+ 	}
+ }
+@@ -7741,7 +7824,12 @@
+ 	if ( ri.CL_IsMinimized() ) {
+ 		vk_stereo3d_frames++;
+ 		if ( vk_stereo3d_both ) {
+-			vk_stereo3d_snapshot( 1 );
++			// visionOS VR (patch 0010): in a redirected world frame the RIGHT eye
++			// was already snapshotted at its own 2D split — before the HUD drew.
++			// Taking it again here would capture the eye WITH the HUD on it, which
++			// is precisely the doubling the redirect exists to remove.
++			if ( !vk_vr_ui_field_split( 2 ) )
++				vk_stereo3d_snapshot( 1 );
+ 			vk_stereo3d_pairs++;
+ 		} else if ( vk_stereo3d_eye >= 1 && vk_stereo3d_eye <= 2 )
+ 			vk_stereo3d_eye_done = vk_stereo3d_eye;
+@@ -7984,6 +8072,58 @@
+ #endif
+ }
+ 
++// visionOS VR (patch 0010): the UI layer the 2D redirect produces, and the count
++// of snapshots taken into it. The compositor draws the head-locked UI panel only
++// while that count is ADVANCING — a stale layer is a frozen HUD hanging in the
++// world, which looks exactly like a working one.
++void *VK_GetVRUIMTLTexture( void )
++{
++#ifdef Q3E_MVK_BRIDGE
++	void *mtlTexture = NULL;
++	if ( q3s_ui_image == VK_NULL_HANDLE )
++		return NULL;
++	vkGetMTLTextureMVK( q3s_ui_image, &mtlTexture );
++	return mtlTexture;
++#else
++	return NULL;
++#endif
++}
++
++int VK_GetVRUIFrames( void ) { return vk_vr_ui_frames; }
++void VK_SetVRUIRedirect( int on ) { vk_vr_ui_redirect = on ? 1 : 0; }
++int VK_GetVRUIRedirect( void ) { return vk_vr_ui_redirect; }
++
++// The brightness treatment the engine's OWN gamma pass applies on its way to the
++// swapchain: pow(colour, 1/r_gamma) * (1 << overbrightBits).
++//
++// That pass runs in the FBO->swapchain blit, which never executes while the
++// engine renders off-screen for a compositor — so anything sampling the FBO
++// directly (the 3D panel, the VR eye blit) has to apply the same treatment or
++// show the player a picture that is both un-brightened AND darker than the flat
++// window by the whole overbright factor, which is a factor of two by default.
++// Reported rather than assumed, and read live, so a brightness change in the
++// menu reaches the compositor without a restart.
++void VK_GetGammaOverbright( float *invGamma, float *obScale )
++{
++	if ( invGamma )
++		*invGamma = ( r_gamma && r_gamma->value > 0.0f ) ? 1.0f / r_gamma->value : 1.0f;
++	if ( obScale )
++		*obScale = ( tr.overbrightBits > 0 ) ? (float)( 1 << tr.overbrightBits ) : 1.0f;
++}
++
++// Where the FINISHED per-eye projection puts the four frustum edges that were
++// asked for. See get_mvp_transform: a correct Vulkan-convention projection puts
++// them at NDC -1 / +1 / +1 / -1 (left, right, bottom, top), and any other answer
++// means the matrix the GPU uses is not the frustum the compositor was told about.
++void VK_GetVREdgeNDC( int eye, float *out4 )
++{
++	int i;
++	if ( eye < 0 || eye > 1 || !out4 )
++		return;
++	for ( i = 0; i < 4; i++ )
++		out4[i] = vk_vr_edge_ndc[eye][i];
++}
++
+ // Wait for the frame just submitted to have COMPLETED on the GPU.
+ //
+ // The compositor copies the per-eye snapshots on its own Metal queue, which is
+@@ -8029,6 +8169,133 @@
+ // (RB_DrawBuffer, which ends/restarts the main pass around it) and after the final
+ // vk_end_render_pass() in vk_end_frame. color_image rests in SHADER_READ_ONLY between
+ // passes and carries TRANSFER_SRC usage (the screenshot path relies on the same).
++/*
++=================
++vk_vr_ui_snapshot
++
++Copy the colour attachment — which at this point holds the frame's 2D stream on
++a transparent ground, nothing else — into the UI layer image. Same shape and the
++same queue ordering as the per-eye snapshot beside it.
++=================
++*/
++void vk_vr_ui_snapshot( void )
++{
++	VkImageCopy region;
++
++	if ( q3s_ui_image == VK_NULL_HANDLE || vk.color_image == VK_NULL_HANDLE )
++		return;
++
++	record_image_layout_transition( vk.cmd->command_buffer, vk.color_image, VK_IMAGE_ASPECT_COLOR_BIT,
++		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 0 );
++	record_image_layout_transition( vk.cmd->command_buffer, q3s_ui_image, VK_IMAGE_ASPECT_COLOR_BIT,
++		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 0 );
++
++	Com_Memset( &region, 0, sizeof( region ) );
++	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++	region.srcSubresource.layerCount = 1;
++	region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++	region.dstSubresource.layerCount = 1;
++	region.extent.width = glConfig.vidWidth;
++	region.extent.height = glConfig.vidHeight;
++	region.extent.depth = 1;
++	qvkCmdCopyImage( vk.cmd->command_buffer, vk.color_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++		q3s_ui_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
++
++	record_image_layout_transition( vk.cmd->command_buffer, q3s_ui_image, VK_IMAGE_ASPECT_COLOR_BIT,
++		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 0 );
++	record_image_layout_transition( vk.cmd->command_buffer, vk.color_image, VK_IMAGE_ASPECT_COLOR_BIT,
++		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 0 );
++	vk_vr_ui_frames++;
++}
++
++
++/*
++=================
++vk_vr_ui_split
++
++The 3D -> 2D transition inside a VR world frame. Called from RB_SetGL2D, which
++is the ONE place the backend already recognises that transition.
++
++Order matters and is the whole mechanism: the eye snapshot is taken FIRST (the
++world, with its depth, and no HUD in it), and only then is the colour attachment
++cleared to transparent for the 2D to land on. Runs at most once per field —
++RDF_NOWORLDMODEL HUD scenes clear projection2D and come back through here, and
++they are HUD content that belongs on the UI layer, not a second split.
++=================
++*/
++void vk_vr_ui_split( void )
++{
++	const vec4_t transparent = { 0.0f, 0.0f, 0.0f, 0.0f };
++	const int f = ( q3s_field == 2 ) ? 1 : 0;
++
++	if ( !vk_vr_active || !vk_vr_ui_redirect || q3s_ui_image == VK_NULL_HANDLE )
++		return;
++	if ( q3s_field != 1 && q3s_field != 2 )
++		return;
++	if ( q3s_ui_split[f] || !q3s_world_drawn[f] )
++		return;
++
++	// Flush what is still batched in tess before the pass ends, or the field's
++	// last 3D batch flushes into the wrong side of the split (patch 0007 paid
++	// for this lesson with a right-eye-only menu cursor).
++	if ( tess.numIndexes )
++		RB_EndSurface();
++
++	vk_end_render_pass();
++	vk_stereo3d_snapshot( f );
++	vk_begin_main_render_pass();
++
++	// A full-window scissor is what vk_clear_color clears through, and that is
++	// derived from projection2D — the same idiom RB_DrawBuffer's r_clear path
++	// uses. The 2D that follows will set it for real a moment later.
++	{
++		const qboolean was2D = backEnd.projection2D;
++		backEnd.projection2D = qtrue;
++		vk_clear_color( transparent );
++		backEnd.projection2D = was2D;
++	}
++	// The pass restarted underneath the backend's cached state; force the
++	// viewport/scissor/depth-range to be re-emitted, exactly as the field
++	// boundary in RB_DrawBuffer does after the same end/begin pair.
++	vk.cmd->depth_range = DEPTH_RANGE_COUNT;
++	q3s_ui_split[f] = 1;
++}
++
++
++// Called by the backend at each field's draw-buffer command. `field` is the eye
++// tag RE_BeginFrame put there (1 = left, 2 = right); the left field is also the
++// start of the host frame, so that is where the per-frame state resets.
++void vk_vr_ui_field( int field )
++{
++	q3s_field = field;
++	if ( field == 1 ) {
++		q3s_ui_split[0] = q3s_ui_split[1] = 0;
++		q3s_world_drawn[0] = q3s_world_drawn[1] = 0;
++	}
++}
++
++// A world (not RDF_NOWORLDMODEL) view began drawing in the current field. The
++// split will not fire before this: a 2D stream with no world behind it has
++// nothing to separate, and snapshotting there would hand the compositor an eye
++// image of the menu.
++void vk_vr_ui_world_drawn( void )
++{
++	if ( q3s_field == 1 ) q3s_world_drawn[0] = 1;
++	else if ( q3s_field == 2 ) q3s_world_drawn[1] = 1;
++}
++
++// Did the split already take this field's eye snapshot? The two callers that ask
++// are the ones that would otherwise take it a second time — at the field
++// boundary and at end of frame — and a second snapshot would capture the eye
++// WITH the 2D on it, which is the whole thing this mechanism exists to prevent.
++int vk_vr_ui_field_split( int field )
++{
++	if ( field == 1 ) return q3s_ui_split[0];
++	if ( field == 2 ) return q3s_ui_split[1];
++	return 0;
++}
++
++
+ void vk_stereo3d_snapshot( int idx )
+ {
+ 	VkImageCopy region;
+--- a/code/renderervk/tr_backend.c
++++ b/code/renderervk/tr_backend.c
+@@ -1087,7 +1087,21 @@
+ 
+ 	if ( backEnd.projection2D ) {
+ 		return;
++	}
++
++#ifdef USE_VULKAN
++	// visionOS VR (patch 0010): this is THE 3D -> 2D transition, and in a VR
++	// world frame it is where the HUD stops belonging in the eye buffers. The
++	// split takes the eye snapshot and clears the surface underneath the 2D; it
++	// is a no-op in every other mode and in every non-world VR frame.
++	//
++	// Before projection2D goes true, deliberately: the split flushes whatever is
++	// still batched in tess, and that batch is still 3D.
++	{
++		extern void vk_vr_ui_split( void );
++		vk_vr_ui_split();
+ 	}
++#endif
+ 
+ 	backEnd.projection2D = qtrue;
+ 
+@@ -1433,6 +1447,16 @@
+ 	backEnd.refdef = cmd->refdef;
+ 	backEnd.viewParms = cmd->viewParms;
+ 
++#ifdef USE_VULKAN
++	// visionOS VR (patch 0010): a WORLD view (as opposed to an RDF_NOWORLDMODEL
++	// HUD scene) is what the 2D redirect separates the HUD from. Recording that
++	// one has drawn is what stops the split firing on a frame that is all menu.
++	if ( !( backEnd.refdef.rdflags & RDF_NOWORLDMODEL ) ) {
++		extern void vk_vr_ui_world_drawn( void );
++		vk_vr_ui_world_drawn();
++	}
++#endif
++
+ #ifdef USE_VBO
+ 	VBO_UnBind();
+ #endif
+@@ -1502,6 +1526,16 @@
+ 	// mid-frame pattern the screenmap switch uses).
+ 	{
+ 		extern void vk_stereo3d_snapshot( int idx );
++		extern void vk_vr_ui_field( int field );
++		extern int  vk_vr_ui_field_split( int field );
++		extern void vk_vr_ui_snapshot( void );
++		extern int  vk_vr_active, vk_vr_ui_redirect;
++
++		// visionOS VR (patch 0010): the left field's draw-buffer command is also
++		// the start of the host frame, so the redirect's per-field state resets
++		// here, before anything can consult it.
++		vk_vr_ui_field( cmd->buffer );
++
+ 		if ( cmd->buffer == 2 ) {
+ 			// Flush the LEFT field's final still-batched 2D draws FIRST: 2D quads
+ 			// batch in tess until a shader change, so the field's last batch (the
+@@ -1511,8 +1545,29 @@
+ 			if ( tess.numIndexes )
+ 				RB_EndSurface();
+ 			vk_end_render_pass();
+-			vk_stereo3d_snapshot( 0 );
++			if ( vk_vr_ui_field_split( 1 ) ) {
++				// The left eye was snapshotted at its 2D split; what colour_image
++				// holds NOW is that field's 2D on a transparent ground — the UI
++				// layer. Taking it here rather than at end of frame is what makes
++				// the HUD render once per host frame: the right field's own 2D
++				// still draws (harmlessly, over a surface nothing samples again),
++				// but it is the LEFT field's copy that reaches the player.
++				vk_vr_ui_snapshot();
++			} else {
++				vk_stereo3d_snapshot( 0 );
++			}
+ 			vk_begin_main_render_pass();
++			if ( vk_vr_active && vk_vr_ui_redirect ) {
++				// Start the right field from a known ground. The world covers the
++				// viewport in practice, but "in practice" is how the left field's
++				// HUD would survive into the right eye on the one map where it
++				// does not.
++				const vec4_t black = { 0.0f, 0.0f, 0.0f, 1.0f };
++				const qboolean was2D = backEnd.projection2D;
++				backEnd.projection2D = qtrue;
++				vk_clear_color( black );
++				backEnd.projection2D = was2D;
++			}
+ 		}
+ 	}
+ 
+--- a/code/renderervk/tr_main.c
++++ b/code/renderervk/tr_main.c
+@@ -642,6 +642,12 @@
+ 	for ( i = 0; i < 3; i++ ) {
+ 		VectorMA( outOrigin, vk_vr_eye_offset[eye][i], body[i], outOrigin );
+ 	}
++
++	// The height calibration's rise, already cut to what fits under the ceiling by
++	// the client's trace. Applied along the BODY up rather than the head's, so
++	// leaning does not change how tall the player is.
++	if ( cl_vr_height_rise != 0.0f )
++		VectorMA( outOrigin, cl_vr_height_rise, body[2], outOrigin );
+ 
+ 	for ( i = 0; i < 3; i++ ) {
+ 		VectorScale( body[0], vk_vr_eye_axis[eye][i][0], outAxis[i] );
+--- a/code/renderervk/tr_local.h
++++ b/code/renderervk/tr_local.h
+@@ -647,6 +647,13 @@
+ extern float vk_vr_eye_axis[2][3][3];	// body-frame eye basis, Q3 convention
+ extern float vk_vr_eye_tangents[2][4];	// left, right, bottom, top
+ extern float vk_vr_cull_tangents[2][2];	// bottom/top tangents the CULL PLANES encode tangents
++// --- overlay patch 0010 ----------------------------------------------------
++extern float vk_vr_edge_ndc[2][4];	// where the FINISHED projection puts them (l,r,b,t)
++// Defined in the CLIENT (cl_input.c), which owns the collision model that
++// clamps it and is linked in every configuration.
++extern float cl_vr_height_rise;		// camera rise, units, already ceiling-clamped
++extern int   vk_vr_ui_redirect;		// this frame's 2D belongs on the UI layer
++extern int   vk_vr_ui_frames;		// UI layer snapshots taken
+ 
+ // Compose the published per-eye pose over the game's view. The base is the
+ // game's own view origin and a YAW-ONLY body basis: pitch and roll belong to
+--- a/code/client/cl_input.c
++++ b/code/client/cl_input.c
+@@ -558,9 +558,139 @@
+ 		cmd->buttons |= BUTTON_ANY;
+ 	}
+ }
++
++
++#ifdef USE_VULKAN_API
++/*
++===============================================================================
++
++visionOS VR client seams (patch 0010)
++
++Three small hooks the visionOS shell drives and every other build ignores: they
++are inert unless `cl_vr_move_basis_active` / `cl_vr_turn_pending` /
++`cl_vr_height_request` are written, and only the VR shell ever writes them.
++
++They live here rather than in the shell because all three need client state the
++shell cannot reach: the finished usercmd, the authoritative viewangles
++accumulator, and the collision model.
++
++===============================================================================
++*/
++
++int   cl_vr_move_basis_active = 0;   // rotate the move vector into a head basis
++float cl_vr_move_basis_yaw = 0.0f;   // that basis, in degrees
++float cl_vr_turn_pending = 0.0f;     // degrees of turn to add to the aim yaw
++float cl_vr_height_request = 0.0f;   // camera rise the shell wants, game units
+ 
++// Published for the MOVENOW dump: what was in the vector before the rotation and
++// what actually went into the packet. Asserting the input and trusting the
++// output is how a rotation that silently does nothing passes its own test.
++int   cl_vr_move_pre_f = 0, cl_vr_move_pre_r = 0;
++int   cl_vr_move_sent_f = 0, cl_vr_move_sent_r = 0;
++// The aim yaw the packet actually carried. The shell adds the head's offset to
++// THIS to name the basis, so the two can never be a frame apart.
++float cl_vr_view_yaw = 0.0f;
+ 
++// The rise the renderer actually applies, after the ceiling clamp below.
++//
++// DEFINED here rather than in the renderer: the client is linked in every
++// configuration and the renderer is not, so a renderer-owned symbol referenced
++// from here would not link a GL-only build. The renderer externs it.
++float cl_vr_height_rise = 0.0f;
++
+ /*
++=================
++CL_VRTurn
++
++Snap and smooth turn, as an additive yaw. The shell owns the feel (mode, degrees
++per second, the snap hysteresis) and hands over finished degrees; this is only
++the seam that gets them into the authoritative accumulator.
++
++Additive is what makes it survive teleports and respawns: pmove works from the
++usercmd angles plus the playerstate's delta_angles, so a yaw the client adds
++rides through a delta-angle reset instead of being erased by it.
++=================
++*/
++static void CL_VRTurn( void )
++{
++	if ( cl_vr_turn_pending == 0.0f )
++		return;
++	cl.viewangles[YAW] += cl_vr_turn_pending;
++	cl_vr_turn_pending = 0.0f;
++}
++
++/*
++=================
++CL_VRHeightClamp
++
++A tall player standing under a low ceiling puts the camera inside the geometry,
++and the inside of a Quake 3 brush is a solid colour with the world missing —
++alarming in full immersion. So the requested rise is traced against the map and
++cut to what fits.
++
++Asymmetric on purpose: ducking under a ceiling is INSTANT (the alternative is
++being inside it for the duration of an ease), and coming back up is eased, so
++walking out from under a doorway lifts the player rather than launching them.
++=================
++*/
++static void CL_VRHeightClamp( void )
++{
++	static float applied = 0.0f;
++	static int   lastTime = 0;
++	const float  margin = 6.0f;      // stay this far below the surface found
++	const float  riseRate = 40.0f;   // units per second on the way back up
++	float allowed, dt;
++	int now;
++
++	// The request is the gate: only the VR shell ever writes it, and it writes
++	// zero the moment VR is not the mode.
++	if ( cl_vr_height_request <= 0.0f ) {
++		applied = ( cl_vr_height_request < 0.0f ) ? cl_vr_height_request : 0.0f;
++		cl_vr_height_rise = applied;
++		lastTime = 0;
++		return;
++	}
++
++	allowed = cl_vr_height_request;
++
++	// Only trace with a live snapshot and a collision model: cls.state gates both,
++	// and cgame is what loaded the map on this side.
++	if ( cls.state == CA_ACTIVE && cl.snap.valid ) {
++		trace_t tr;
++		vec3_t start, end;
++
++		VectorCopy( cl.snap.ps.origin, start );
++		start[2] += cl.snap.ps.viewheight;
++		VectorCopy( start, end );
++		end[2] += allowed + margin;
++
++		CM_BoxTrace( &tr, start, end, vec3_origin, vec3_origin, 0, CONTENTS_SOLID, qfalse );
++		if ( tr.fraction < 1.0f ) {
++			allowed = ( allowed + margin ) * tr.fraction - margin;
++			if ( allowed < 0.0f )
++				allowed = 0.0f;
++		}
++	}
++
++	now = Sys_Milliseconds();
++	dt = ( lastTime && now > lastTime ) ? ( now - lastTime ) * 0.001f : 0.0f;
++	lastTime = now;
++	if ( dt > 0.25f )
++		dt = 0.25f;      // a level load is not a second of rising
++
++	if ( allowed <= applied ) {
++		applied = allowed;               // duck instantly
++	} else {
++		applied += riseRate * dt;        // rise eased
++		if ( applied > allowed )
++			applied = allowed;
++	}
++	cl_vr_height_rise = applied;
++}
++#endif // USE_VULKAN_API
++
++
++/*
+ ==============
+ CL_FinishMove
+ ==============
+@@ -574,6 +704,38 @@
+ 	// send the current server time so the amount of movement
+ 	// can be determined without allowing cheating
+ 	cmd->serverTime = cl.serverTime;
++
++#ifdef USE_VULKAN_API
++	// visionOS VR: move where the player is LOOKING, not where the gun is aimed.
++	//
++	// The server interprets forwardmove/rightmove relative to the yaw in
++	// cmd->angles, and in VR that yaw is the aim — which is not the direction the
++	// player's head is facing once the two are decoupled. Pushing the stick
++	// forward with the head turned 70 degrees then walks 70 degrees off. Rotating
++	// the FINISHED move vector by the difference is exactly the decoupling, and it
++	// needs nothing from the server: the vector that arrives is the one the player
++	// asked for, expressed in the basis the server already uses.
++	//
++	// This is the last possible moment — every contributor (keys, joystick, touch)
++	// has landed in the vector by now, so no input source can bypass it.
++	if ( cl_vr_move_basis_active ) {
++		const float delta = ( cl_vr_move_basis_yaw - cl.viewangles[YAW] ) * ( M_PI / 180.0f );
++		const float s = sin( delta ), c = cos( delta );
++		const float f = cmd->forwardmove, r = cmd->rightmove;
++		float nf = f * c - r * s;
++		float nr = f * s + r * c;
++		// signed char: the rotation of a corner-pinned (127,127) vector is longer
++		// than either axis allows, and letting it wrap turns a diagonal into its
++		// opposite.
++		if ( nf > 127.0f ) nf = 127.0f; else if ( nf < -127.0f ) nf = -127.0f;
++		if ( nr > 127.0f ) nr = 127.0f; else if ( nr < -127.0f ) nr = -127.0f;
++		cmd->forwardmove = (signed char)( nf >= 0.0f ? nf + 0.5f : nf - 0.5f );
++		cmd->rightmove   = (signed char)( nr >= 0.0f ? nr + 0.5f : nr - 0.5f );
++	}
++	cl_vr_move_sent_f = cmd->forwardmove;
++	cl_vr_move_sent_r = cmd->rightmove;
++	cl_vr_view_yaw = cl.viewangles[YAW];
++#endif
+ 
+ 	for (i=0 ; i<3 ; i++) {
+ 		cmd->angles[i] = ANGLE2SHORT(cl.viewangles[i]);
+@@ -608,6 +770,15 @@
+ 	// get basic movement from joystick
+ 	CL_JoystickMove( &cmd );
+ 
++#ifdef USE_VULKAN_API
++	// visionOS VR: the turn arrives as degrees rather than as look deltas, so it
++	// lands after every look contributor and before the vector is finished.
++	CL_VRTurn();
++	CL_VRHeightClamp();
++	cl_vr_move_pre_f = cmd.forwardmove;
++	cl_vr_move_pre_r = cmd.rightmove;
++#endif
++
+ 	// check to make sure the angles haven't wrapped
+ 	if ( cl.viewangles[PITCH] - oldAngles[PITCH] > 90 ) {
+ 		cl.viewangles[PITCH] = oldAngles[PITCH] + 90;

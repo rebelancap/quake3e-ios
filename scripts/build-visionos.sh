@@ -23,6 +23,18 @@ MVK=$ROOT/vendor/moltenvk/MoltenVK.xcframework/xros-arm64
 [ -d "$REF/client" ]   || { echo "FATAL: reference macOS vk build missing — run scripts/build-oracle.sh"; exit 1; }
 [ -f "$MVK/libMoltenVK.a" ] || "$ROOT/scripts/fetch-moltenvk.sh"
 [ -f "$MVK/libMoltenVK.a" ] || { echo "FATAL: MoltenVK xros slice still missing after fetch"; exit 1; }
+
+# Dev gate parity with publish-ota.sh: a FOUR-component version is a dev build
+# and gets the Remote Console switch. Without this, a cable deploy silently
+# replaced the OTA build with one MISSING the switch (bitten 2026-08-20).
+# publish-ota.sh still owns the variable when it drives this script.
+if [ -z "${Q3E_DEV_DEFS+x}" ]; then
+  case "$(plutil -extract CFBundleShortVersionString raw "$APP/Info-visionos.plist")" in
+    *.*.*.*) export Q3E_DEV_DEFS='$(inherited) Q3E_DEV_BUILD=1'
+             echo "== dev version detected: Remote Console switch INCLUDED ==" ;;
+    *)       export Q3E_DEV_DEFS="" ;;
+  esac
+fi
 [ -f "$ROOT/build/visionos-deps/prefix/lib/libcurl.a" ] || "$ROOT/scripts/build-visionos-deps.sh"
 
 SDKPATH=$(xcrun --sdk xros --show-sdk-path)

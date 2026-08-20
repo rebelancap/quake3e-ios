@@ -1,0 +1,38 @@
+--- a/code/client/cl_ui.c
++++ b/code/client/cl_ui.c
+@@ -27,6 +27,10 @@
+ extern	botlib_export_t	*botlib_export;
+ 
+ vm_t *uivm = NULL;
++
++// Milliseconds at the last UI_KEY_GETOVERSTRIKEMODE query — see the comment at
++// that case. Zero until the UI module asks for the first time.
++int cl_uiTextFieldQueryTime = 0;
+ 
+ /*
+ ====================
+@@ -956,6 +960,14 @@
+ 		return Key_IsDown( args[1] );
+ 
+ 	case UI_KEY_GETOVERSTRIKEMODE:
++		// Text-input focus hint. The UI module asks for the overstrike mode in
++		// exactly one place: while painting the blinking cursor of the menu
++		// field that currently has focus (q3_ui MField_Draw, reached only with
++		// UI_PULSE set). So a recent query is the only engine-visible evidence
++		// that a QVM text field wants characters — which is what a touch
++		// platform needs in order to raise a soft keyboard for it. Recording
++		// the time changes no behaviour on any platform.
++		cl_uiTextFieldQueryTime = Sys_Milliseconds();
+ 		return Key_GetOverstrikeMode();
+ 
+ 	case UI_KEY_SETOVERSTRIKEMODE:
+--- a/code/client/client.h
++++ b/code/client/client.h
+@@ -380,6 +380,7 @@
+ 
+ extern	vm_t			*cgvm;	// interface to cgame dll or vm
+ extern	vm_t			*uivm;	// interface to ui dll or vm
++extern	int				cl_uiTextFieldQueryTime;	// ms at the last UI overstrike query = a menu text field has focus
+ extern	refexport_t		re;		// interface to refresh .dll
+ 
+ 

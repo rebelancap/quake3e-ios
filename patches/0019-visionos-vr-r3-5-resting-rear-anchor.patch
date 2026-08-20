@@ -1,0 +1,289 @@
+--- a/code/renderervk/tr_scene.c
++++ b/code/renderervk/tr_scene.c
+@@ -528,27 +528,30 @@
+ */
+ /*
+ =================
+-R_VRGunRearX
++R_VRGunModelBounds
+ 
+-The model's own rear plane — the end nearest the player — in model space, plus
+-the length that picks the weapon out of the assembly.
++The model's own frame-0 bounding box, and the length along its longest-known
++axis that picks the weapon out of the assembly.
+ 
+ Frame 0 / static bounds by construction: R_ModelBounds reads the FIRST frame of
+ an MD3 or MDR, never the frame the entity is animating on, so an idle animation
+ cannot make the anchor below pump in and out.
++
++A tag-only model — every baseq3 `<weapon>_hand.md3` is one, no surfaces at all —
++answers with the MD3 loader's empty-box sentinel (mins +99999, maxs -99999) and
++therefore a NEGATIVE length, which is the caller's cue to skip it.
+ 
+ Cached because R_VRRebaseViewmodel runs per scene and a scene has up to two
+ fields; a weapon change moves one entry and the rest keep answering. Direct
+ mapped on the handle, so a collision costs a re-read and never a wrong answer.
+ =================
+ */
+-static float R_VRGunRearX( qhandle_t hModel, float *lengthOut )
++static float R_VRGunModelBounds( qhandle_t hModel, vec3_t mins, vec3_t maxs )
+ {
+ 	static qhandle_t cacheHandle[8];
+-	static float cacheRear[8], cacheLen[8];
++	static vec3_t cacheMins[8], cacheMaxs[8];
+ 	static int cacheReady = 0;
+ 	const int slot = (int)( hModel & 7 );
+-	vec3_t mins, maxs;
+ 
+ 	if ( !cacheReady ) {
+ 		int k;
+@@ -557,30 +560,45 @@
+ 		cacheReady = 1;
+ 	}
+ 	if ( cacheHandle[slot] != hModel ) {
+-		R_ModelBounds( hModel, mins, maxs );
++		R_ModelBounds( hModel, cacheMins[slot], cacheMaxs[slot] );
+ 		cacheHandle[slot] = hModel;
+-		cacheRear[slot] = mins[0];
+-		cacheLen[slot] = maxs[0] - mins[0];
+ 	}
+-	*lengthOut = cacheLen[slot];
+-	return cacheRear[slot];
++	VectorCopy( cacheMins[slot], mins );
++	VectorCopy( cacheMaxs[slot], maxs );
++	return maxs[0] - mins[0];
+ }
+ 
+-// The reference rear plane: baseq3 machinegun.md3, frame 0, mins[0]. Every
+-// weapon is anchored to THIS number, which is what makes the change a
+-// re-anchoring rather than a re-placement — the machinegun lands exactly where
+-// it did before, so the Grip Forward value tuned on glass keeps its meaning and
+-// only the weapon-to-weapon variance goes away.
+-#define VR_GUN_REAR_REF (-5.765625f)
++// The reference: where baseq3's machinegun assembly ALREADY puts its rear plane,
++// measured forward from the game view — the cgame's own placement of the entity
++// (-6.921875, which is machinegun_hand.md3's tag_weapon at the idle frame) plus
++// the model's own rear plane relative to that origin (-5.765625, machinegun.md3
++// frame 0). Every weapon is anchored to THIS number, which is what makes the
++// change a re-anchoring rather than a re-placement: the machinegun lands exactly
++// where it did before, so the Grip Forward value tuned on glass keeps its
++// meaning, and only the weapon-to-weapon variance goes away.
++//
++// R3.5 measured both halves. R3.4 corrected only the second one, and the two are
++// ANTI-CORRELATED — the artists who placed tag_weapon pushed it forward exactly
++// on the models whose mesh reaches furthest back — so correcting one alone
++// EXPOSES the other. Across the ten baseq3 first-person weapons the rear plane
++// spanned 16.7 units before R3.4 and 20.7 units after it. That is why the round
++// that shipped the anchor changed nothing anyone could see.
++#define VR_GUN_REST_REF (-12.6875f)
+ 
++// A mod is free to ship a weapon whose bounds are nonsense. The correction is
++// clamped before it is scaled, so the worst a bad model can do is sit at the end
++// of its leash instead of in the next room. baseq3's largest correction is the
++// grenade launcher's 11.3 units, comfortably inside this.
++#define VR_GUN_ANCHOR_LIMIT (16.0f)
++
+ static void R_VRRebaseViewmodel( const refdef_t *fd )
+ {
+ 	vec3_t hand[3], org, f, r, u, nf, nr, nu;
+ 	float relOrigin[3], relAxis[3][3];
+ 	const float d2r = (float)(M_PI / 180.0);
+ 	float sp, cp, sy, cy, sr, cr;
+-	float rearX, bestLen;
+-	int i, j, n;
++	float rearF, fwdF, bestLen, correction;
++	int i, j, n, haveGun;
+ 
+ 	vk_vr_gun_entities = 0;
+ 	vk_vr_gun_mounted = 0;
+@@ -625,44 +643,90 @@
+ 
+ 	n = r_numentities - r_firstSceneEntity;
+ 
+-	// --- the rear-plane anchor (overlay patch 0018) -------------------------
+-	// The re-base above preserves each entity's pose relative to the game view,
+-	// and the cgame placed that pose by the model's ORIGIN — which sits at a
+-	// different point along every weapon. So one Grip Forward value put the
+-	// grenade launcher (rear plane at -5.4) noticeably further out of the fist
+-	// than the railgun (-14.1): per-weapon model geometry was leaking into where
+-	// the gun sat, and no single number could suit both.
++	// --- the resting rear-plane anchor (overlay patch 0019) -----------------
++	// Where a weapon's rear plane — the end nearest the player, the end a hand
++	// actually holds — ends up is the sum of TWO per-weapon numbers, and both
++	// have to be measured or neither correction is worth making:
+ 	//
+-	// Measure the model instead and slide the WHOLE assembly along the grip's
+-	// forward axis so the rear plane — the end nearest the player, the end a
+-	// hand actually holds — lands at the same distance for every weapon.
+-	//
+-	// The weapon is picked as the longest model in the assembly, which needs no
+-	// knowledge of what the cgame added: the hands model is tag-only and has no
+-	// bounds at all, the muzzle flash is short along forward (wide across it,
+-	// which is why length and not volume is the test), and the barrel is a part
+-	// of a gun that is longer than it. A mod's own weapon is measured the same
+-	// way as a stock one.
+-	rearX = VR_GUN_REAR_REF;
++	//   1. where the cgame put the entity. CG_AddViewWeapon hangs the weapon off
++	//      `tag_weapon` in that weapon's own hands model, and the artist placed
++	//      that tag differently for every one: -10.4 for the rocket launcher,
++	//      +10.4 for the gauntlet, a 20.8-unit spread along forward.
++	//   2. where the model's own geometry sits relative to that origin: mins[0]
++	//      from -14.1 (railgun) to -5.4 (grenade launcher), an 8.8-unit spread.
++	//
++	// R3.4 corrected 2 alone, and the two are anti-correlated — the tag was
++	// pushed forward precisely on the models that reach furthest back — so the
++	// correction cancelled some of the compensation the artists had already
++	// applied. Measured across the ten baseq3 first-person weapons, the rear
++	// plane spanned 16.7 units before that change and 20.7 after it. Correcting
++	// the SUM is what actually removes the variance, and it removes all of it.
++	//
++	// Both numbers are read off the scene the cgame just built, so nothing here
++	// needs a table of weapon names and a mod's own weapon is measured the same
++	// way a stock one is. The weapon is picked as the longest model in the
++	// assembly: the hands model is not added to the scene at all, the muzzle
++	// flash is short along forward (wide across it, which is why length and not
++	// volume is the test), and the barrel is a part of a gun longer than it.
++	//
++	// Term 1 is read live rather than cached per model, which does mean the
++	// forward component of the hands model's own animation — the recoil punch
++	// and the weapon-switch slide — is held at the rest position while a hand is
++	// tracked. That is a real cost, deliberately paid: those animations move the
++	// gun by a couple of units, the variance being corrected here moves it by
++	// twenty, and every one of them still swings and rotates through its other
++	// two axes. `q3evranchor 0` turns the whole mechanism off for an A/B.
++	rearF = 0.0f;
++	fwdF = 0.0f;
+ 	bestLen = 0.0f;
++	haveGun = 0;
+ 	for ( i = 0; i < n; i++ ) {
+ 		const trRefEntity_t *ent = &backEndData->entities[ r_firstSceneEntity + i ];
+-		float len, rear;
++		vec3_t mins, maxs, d;
++		float len, centerF, extentF, c, h, dot;
++		int k;
+ 
+ 		if ( !( ent->e.renderfx & RF_FIRST_PERSON ) )
+ 			continue;
+-		rear = R_VRGunRearX( ent->e.hModel, &len );
++		len = R_VRGunModelBounds( ent->e.hModel, mins, maxs );
+ 		if ( len <= 0.0f )
+ 			continue;	// tag-only or bad model: it has no rear plane to speak of
+-		if ( len > bestLen ) {
+-			bestLen = len;
+-			rearX = rear;
++		if ( len <= bestLen )
++			continue;
++		bestLen = len;
++
++		// The rearmost point of the model's box along the GAME VIEW's forward,
++		// as a support function rather than mins[0], because the entity's own
++		// axes are not the view's: `tag_weapon` rotates the gauntlet about 27
++		// degrees and mins[0] alone would measure the wrong corner of it.
++		centerF = 0.0f;
++		extentF = 0.0f;
++		for ( k = 0; k < 3; k++ ) {
++			c = 0.5f * ( mins[k] + maxs[k] );
++			h = 0.5f * ( maxs[k] - mins[k] );
++			dot = DotProduct( ent->e.axis[k], fd->viewaxis[0] );
++			centerF += c * dot;
++			extentF += fabs( h * dot );
+ 		}
++		rearF = centerF - extentF;
++
++		// ...and where the cgame hung that box, in the same axis.
++		VectorSubtract( ent->e.origin, fd->vieworg, d );
++		fwdF = DotProduct( d, fd->viewaxis[0] );
++		haveGun = 1;
+ 	}
+-	// Scaled with the weapon, because the model is: Weapon Size multiplies the
+-	// same geometry this correction is measured from.
+-	vk_vr_gun_anchor = ( VR_GUN_REAR_REF - rearX ) * vk_vr_gun_scale;
+-	vk_vr_gun_rear = rearX;
++	vk_vr_gun_rear = rearF;
++	vk_vr_gun_fwd = fwdF;
++	vk_vr_gun_rest = fwdF + rearF;
++	vk_vr_gun_anchor = 0.0f;
++	if ( haveGun && vk_vr_gun_anchor_on ) {
++		correction = VR_GUN_REST_REF - vk_vr_gun_rest;
++		if ( correction >  VR_GUN_ANCHOR_LIMIT ) correction =  VR_GUN_ANCHOR_LIMIT;
++		if ( correction < -VR_GUN_ANCHOR_LIMIT ) correction = -VR_GUN_ANCHOR_LIMIT;
++		// Scaled with the weapon, because the model is: Weapon Size multiplies
++		// the same geometry this correction is measured from.
++		vk_vr_gun_anchor = correction * vk_vr_gun_scale;
++	}
+ 	VectorMA( org, vk_vr_gun_anchor, hand[0], org );
+ 	//
+ 	// The UP axis is deliberately NOT anchored this way. Measured across every
+--- a/code/renderervk/tr_local.h
++++ b/code/renderervk/tr_local.h
+@@ -730,7 +730,11 @@
+ extern float vk_vr_gun_angles[3];
+ extern float vk_vr_hand_world[3];
+ extern float vk_vr_gun_anchor;		// R3.4: units slid to put the rear plane on the anchor
+-extern float vk_vr_gun_rear;		// the chosen model's own rear plane, model space
++extern float vk_vr_gun_rear;		// the chosen model's rear plane, along the view forward
++extern float vk_vr_gun_fwd;		// R3.5: where the cgame hung it, along the view forward
++extern float vk_vr_gun_rest;		// R3.5: the sum — the rear plane the anchor corrects
++extern int   vk_vr_gun_anchor_on;	// R3.5: the `q3evranchor` A/B
++void VK_SetVRGunAnchor( int on );
+ void VK_VRGunString( char *buf, int size );
+ 
+ // Compose the published per-eye pose over the game's view. The base is the
+--- a/code/renderervk/vk.c
++++ b/code/renderervk/vk.c
+@@ -3346,7 +3346,7 @@
+ // R3.4: the numbers the maintainer dialled on glass. Forward is unchanged — the
+ // rear-plane anchor (tr_scene.c) is referenced to the machinegun, so this value
+ // still means what it meant while it was being tuned.
+-float vk_vr_grip[3] = { -8.0f, -3.0f, 4.0f };        // forward, right, up (units)
++float vk_vr_grip[3] = { -8.0f, -2.5f, 4.0f };        // forward, right, up (units)
+ float vk_vr_grip_angles[3] = { 0.0f, 0.0f, 0.0f };   // pitch, yaw, roll (degrees)
+ // What the last re-base actually did, for VIEWMODELNOW. Reporting the values
+ // that went IN would read identically on a build where the re-base never ran.
+@@ -3355,11 +3355,14 @@
+ float vk_vr_gun_origin[3];
+ float vk_vr_gun_angles[3];
+ float vk_vr_hand_world[3];
+-// R3.4: the rear-plane anchor, as measured and as applied. Both come from the
+-// model the last scene actually chose, so a build where the lookup silently
+-// failed reports the reference rear plane and a zero slide rather than nothing.
++// R3.4/R3.5: the rear-plane anchor, as measured and as applied. Every number
++// comes from the model the last scene actually chose, so a build where the
++// lookup silently failed reports zeros rather than a plausible-looking guess.
+ float vk_vr_gun_anchor = 0.0f;               // units slid along the grip forward
+-float vk_vr_gun_rear = 0.0f;                 // the chosen model's own rear plane
++float vk_vr_gun_rear = 0.0f;                 // the model's rear plane, view forward
++float vk_vr_gun_fwd = 0.0f;                  // where the cgame hung it, view forward
++float vk_vr_gun_rest = 0.0f;                 // the sum the anchor actually corrects
++int   vk_vr_gun_anchor_on = 1;               // the `q3evranchor` A/B
+ static VkImage     q3s_eye_depth[2];         // per-eye DEPTH snapshots
+ static VkImageView q3s_eye_depth_view[2];
+ static int         q3s_depth_copies = 0;
+@@ -8366,16 +8369,25 @@
+ 	Com_sprintf( buf, size,
+ 		"aimhand=%s handvalid=(L%d,R%d) mounted=%d entities=%d "
+ 		"hand=(%.1f,%.1f,%.1f)u gun=(%.1f,%.1f,%.1f)u gunang=(p%.1f,y%.1f,r%.1f)deg "
+-		"rear=%.1fu anchor=%+.1fu depthhack=off",
++		"fwd=%.1fu rear=%.1fu rest=%.1fu anchor=%+.1fu anch=%s depthhack=off",
+ 		vk_vr_aim_hand ? "right" : "left",
+ 		vk_vr_hand_valid[0], vk_vr_hand_valid[1],
+ 		vk_vr_gun_mounted, vk_vr_gun_entities,
+ 		vk_vr_hand_world[0], vk_vr_hand_world[1], vk_vr_hand_world[2],
+ 		vk_vr_gun_origin[0], vk_vr_gun_origin[1], vk_vr_gun_origin[2],
+ 		vk_vr_gun_angles[0], vk_vr_gun_angles[1], vk_vr_gun_angles[2],
+-		vk_vr_gun_rear, vk_vr_gun_anchor );
++		vk_vr_gun_fwd, vk_vr_gun_rear, vk_vr_gun_rest, vk_vr_gun_anchor,
++		vk_vr_gun_anchor_on ? "on" : "off" );
+ }
+ 
++// The `q3evranchor` A/B. Off restores exactly the placement the cgame asked for,
++// which is the state every build before R3.4 shipped — so a headset can compare
++// the mechanism against its own absence in one command, without a reinstall.
++void VK_SetVRGunAnchor( int on )
++{
++	vk_vr_gun_anchor_on = on ? 1 : 0;
++}
++
+ // Per-eye DEPTH snapshot as a Metal texture, re-resolved on every call for the
+ // same reason the colour accessor is: a vid_restart recreates the images and a
+ // cached pointer would be stale.

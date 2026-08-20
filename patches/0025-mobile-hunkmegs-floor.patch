@@ -1,0 +1,28 @@
+--- a/code/qcommon/common.c
++++ b/code/qcommon/common.c
+@@ -2170,6 +2170,25 @@
+ 	// allocate the stack based hunk allocator
+ 	cv = Cvar_Get( "com_hunkMegs", XSTRING( DEF_COMHUNKMEGS ), CVAR_LATCH | CVAR_ARCHIVE );
+ 	Cvar_CheckRange( cv, XSTRING( MIN_COMHUNKMEGS ), va("%d", (INT_MAX-63) / (1024*1024)), CV_INTEGER );
++#ifdef Q3E_MVK_BRIDGE
++	// iOS/visionOS hunk floor (Q3E_MVK_BRIDGE is defined by build-ios.sh and
++	// build-visionos.sh, and by nothing else — the macOS oracle keeps upstream's
++	// value so it stays a parity reference).
++	// Upstream's 128 MB default is a 2005-era figure:
++	// Urban Terror's maps blow straight through it ("Hunk_Alloc failed on
++	// 67109888" — one 64 MB request), and so do other large mod maps. Raising
++	// DEF_COMHUNKMEGS alone would not help anyone who has already launched the
++	// game, because com_hunkMegs is CVAR_ARCHIVE and every existing q3config
++	// on disk carries the old 128. So floor the live value here instead.
++	//
++	// 512 MB costs nothing until it is touched: the backing calloc for a block
++	// this large is served by mmap'd zero pages, which commit lazily per page.
++	if ( cv->integer < 512 ) {
++		Com_Printf( "com_hunkMegs %i is below the mobile floor — raising to 512\n", cv->integer );
++		// Cvar_Set forces past the latch, so cv->integer is live immediately.
++		Cvar_Set( "com_hunkMegs", "512" );
++	}
++#endif
+ 	Cvar_SetDescription( cv, "The size of the hunk memory segment." );
+ 
+ 	s_hunkTotal = cv->integer * 1024 * 1024;

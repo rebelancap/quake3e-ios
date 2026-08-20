@@ -102,6 +102,7 @@ xcodebuild -project "$APP/Quake3e.xcodeproj" -target Quake3e-visionOS -configura
   -sdk xrsimulator ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
   LIBRARY_SEARCH_PATHS="$LIBDIR" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+  ${Q3E_DEV_DEFS:+GCC_PREPROCESSOR_DEFINITIONS="$Q3E_DEV_DEFS"} \
   SYMROOT="$ROOT/build/visionos-sim/xcode" build > "$ROOT/build/visionos-sim/xcodebuild.log" 2>&1 \
   || { echo "FATAL: xcodebuild failed — tail:"; tail -30 "$ROOT/build/visionos-sim/xcodebuild.log"; exit 1; }
 

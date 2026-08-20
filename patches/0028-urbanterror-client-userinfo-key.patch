@@ -1,0 +1,24 @@
+--- a/code/client/cl_main.c
++++ b/code/client/cl_main.c
+@@ -2396,7 +2396,20 @@
+ 
+ 		// for now - this will be used to inform server about q3msgboom fix
+ 		// this is optional key so will not trigger oversize warning
+-		Info_SetValueForKey_s( info, MAX_USERINFO_LENGTH, "client", Q3_VERSION );
++		//
++		// ...except under Urban Terror, where it gets you thrown out. UrT servers
++		// widely run BigBrotherBot with the vpncheck plugin, which stores this key
++		// as the client's "app" and tempbans anyone whose value is not in its
++		// allow-list: "Non whitelist client Q3 1.32e", reproduced on a live server
++		// 2026-08-20. The plugin skips the check entirely when the key is absent
++		// (`if sclient.app != ""` — dkman123/B4 b4/extplugins/vpncheck), and the
++		// engine UrT actually ships, ioUrbanTerror, never sends it. So under q3ut4
++		// we send none either. Everywhere else it stays: a Quake3e server reads it
++		// to decide the client can take long strings and protocol extensions
++		// (sv_client.c, SV_DirectConnect).
++		if ( Q_stricmp( FS_GetCurrentGameDir(), "q3ut4" ) != 0 ) {
++			Info_SetValueForKey_s( info, MAX_USERINFO_LENGTH, "client", Q3_VERSION );
++		}
+ 
+ 		if ( !notOverflowed ) {
+ 			Com_Printf( S_COLOR_YELLOW "WARNING: oversize userinfo, you might be not able to join remote server!\n" );

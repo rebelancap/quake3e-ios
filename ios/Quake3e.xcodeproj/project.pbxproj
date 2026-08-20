@@ -16,6 +16,7 @@
 		173FB93496B5FBFC59D7FB40 /* CoreMotion.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8D1F0066AA4E688EA48C2FC3 /* CoreMotion.framework */; };
 		185C6F61D28F5C5684A12BB4 /* ios_snd.c in Sources */ = {isa = PBXBuildFile; fileRef = 6FA43AC1FB6966A5F89DA82F /* ios_snd.c */; };
 		1A1B861A4D5B98583A0BEA2B /* GameController.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E54F9A25DC37C6780486BC76 /* GameController.framework */; };
+		1EE6BF55E4A4D33160540B67 /* Q3EVRGlue.c in Sources */ = {isa = PBXBuildFile; fileRef = 8DAAA39E4A34C35AC99FD4F8 /* Q3EVRGlue.c */; };
 		1EE7471BB794DF2CF1EBDE05 /* Q3EImmersive.m in Sources */ = {isa = PBXBuildFile; fileRef = F19A3D9E8C56D2A21796B565 /* Q3EImmersive.m */; };
 		22936B92BD2143F15F69BDD7 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9F147F24E9462C77D359242F /* Security.framework */; };
 		27F9BA1985E78C2B5411AD20 /* ios_audio.m in Sources */ = {isa = PBXBuildFile; fileRef = E826F1F0CCAADACCEE5B603C /* ios_audio.m */; };
@@ -39,6 +40,7 @@
 		715D1C24AEB0F5EFAAE1671C /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 36CC490E0E38BA5D925C297D /* CoreGraphics.framework */; };
 		72A00A9E2FD00D724D0F67ED /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9EF71329A1C7CC7EDC8C611B /* AudioToolbox.framework */; };
 		741FA5F59D121B93F2D2392F /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CC068F6D19C4D3A25A2F1769 /* QuartzCore.framework */; };
+		840DF7FBBCC199983E43949D /* Q3EVR.m in Sources */ = {isa = PBXBuildFile; fileRef = 04DCD76BF71B991FD24804E6 /* Q3EVR.m */; };
 		867E7497BB7D372071DC5E2A /* Assets-visionos.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DF4F3136705C2198860DC481 /* Assets-visionos.xcassets */; };
 		881A40E6C93FCC05BD94B4FC /* ios_onboarding.m in Sources */ = {isa = PBXBuildFile; fileRef = 67B95E936A35BC4D99C250A7 /* ios_onboarding.m */; };
 		8891BBB02A45CF2D1FEADA8D /* ios_metal.m in Sources */ = {isa = PBXBuildFile; fileRef = E49EC9B3284D1B2BC896644E /* ios_metal.m */; };
@@ -46,12 +48,14 @@
 		8FD1D5F9D892BFE13356B979 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5612936E65EAA6B94B487548 /* Foundation.framework */; };
 		A97BDE7175999A5496A08649 /* ios_console.m in Sources */ = {isa = PBXBuildFile; fileRef = 2AC36C1F39314DF1FE314BE7 /* ios_console.m */; };
 		AC1D3F3BE6B90C19682C7352 /* ios_settings.m in Sources */ = {isa = PBXBuildFile; fileRef = 66978FAE2B803D616BE6176F /* ios_settings.m */; };
+		AD7C0A4FEDEAECBBB3E9A430 /* Q3ESense.m in Sources */ = {isa = PBXBuildFile; fileRef = 0ADAE52C6540EF5EE6D5E4C4 /* Q3ESense.m */; };
 		AFD85AD72972E99E7C2D1DEA /* Q3EBlackBox.m in Sources */ = {isa = PBXBuildFile; fileRef = 6E5EFFD7864F142C8CA4394D /* Q3EBlackBox.m */; };
 		BEF9BEE79FB9A84EFD713454 /* AppShell.m in Sources */ = {isa = PBXBuildFile; fileRef = D9CE7C66352300892A1B6B0D /* AppShell.m */; };
 		BF34D10CEA356B21F2CF3EDB /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F8291DC06CA7B3C93F2C8EF3 /* SystemConfiguration.framework */; };
 		C3265238E7FFE3FF3FD0DF29 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F8291DC06CA7B3C93F2C8EF3 /* SystemConfiguration.framework */; };
 		CC2360F670973D2F94B4B7EC /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AB8F52D7E98B32EC7FA91D30 /* Metal.framework */; };
 		D0CBD2C70FED9C8D8ACAEB6E /* CoreMotion.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8D1F0066AA4E688EA48C2FC3 /* CoreMotion.framework */; };
+		D7CAE270F9A1F18745DE45A3 /* CoreHaptics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4A1541D0C217EEA9000A1CC4 /* CoreHaptics.framework */; };
 		D89976254862A86FF580079F /* ios_input.m in Sources */ = {isa = PBXBuildFile; fileRef = 64B9DA38E4711DA3D1DAD406 /* ios_input.m */; };
 		D94404F62A6C44F21EF8199E /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6D5BA427322AB0E1A8E703A0 /* AVFoundation.framework */; };
 		D9C7FD5CE38D07AF1F7D5FCA /* MoltenVK.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0AF1B1EB09A3FC44B64B1BFE /* MoltenVK.xcframework */; };
@@ -67,7 +71,9 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		04DCD76BF71B991FD24804E6 /* Q3EVR.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Q3EVR.m; sourceTree = "<group>"; };
 		0A872BF429A97D8C1D97B3D8 /* MoltenVK.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = MoltenVK.xcframework; path = ../vendor/moltenvk/MoltenVK.xcframework; sourceTree = "<group>"; };
+		0ADAE52C6540EF5EE6D5E4C4 /* Q3ESense.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Q3ESense.m; sourceTree = "<group>"; };
 		0AF1B1EB09A3FC44B64B1BFE /* MoltenVK.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = MoltenVK.xcframework; path = "../vendor/moltenvk-ios/MoltenVK/MoltenVK/static/MoltenVK.xcframework"; sourceTree = "<group>"; };
 		0E9B00160D1137ACAE4935A2 /* ios_audio.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ios_audio.h; sourceTree = "<group>"; };
 		248D5F9516594A2CDD56EBF2 /* ios_settings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ios_settings.h; sourceTree = "<group>"; };
@@ -76,6 +82,8 @@
 		2AC36C1F39314DF1FE314BE7 /* ios_console.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ios_console.m; sourceTree = "<group>"; };
 		36CC490E0E38BA5D925C297D /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
 		483A838A3390D4F3D0FE4CAB /* Q3EBlackBox.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Q3EBlackBox.h; sourceTree = "<group>"; };
+		4A1541D0C217EEA9000A1CC4 /* CoreHaptics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreHaptics.framework; path = System/Library/Frameworks/CoreHaptics.framework; sourceTree = SDKROOT; };
+		53607DA651BDB962425979D5 /* Q3EVR.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Q3EVR.h; sourceTree = "<group>"; };
 		5612936E65EAA6B94B487548 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
 		64B9DA38E4711DA3D1DAD406 /* ios_input.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ios_input.m; sourceTree = "<group>"; };
 		66978FAE2B803D616BE6176F /* ios_settings.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ios_settings.m; sourceTree = "<group>"; };
@@ -87,10 +95,12 @@
 		7D7173C31A62848743DF3F01 /* ios_glue.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ios_glue.c; sourceTree = "<group>"; };
 		85E7776CF90E063322860D7B /* AppShell_vision.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AppShell_vision.m; sourceTree = "<group>"; };
 		8D1F0066AA4E688EA48C2FC3 /* CoreMotion.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMotion.framework; path = System/Library/Frameworks/CoreMotion.framework; sourceTree = SDKROOT; };
+		8DAAA39E4A34C35AC99FD4F8 /* Q3EVRGlue.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = Q3EVRGlue.c; sourceTree = "<group>"; };
 		9EF71329A1C7CC7EDC8C611B /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
 		9F147F24E9462C77D359242F /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		A28E7D2CE746F930C9DFFDE9 /* IOSurface.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOSurface.framework; path = System/Library/Frameworks/IOSurface.framework; sourceTree = SDKROOT; };
 		AB8F52D7E98B32EC7FA91D30 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		ADA1A34160030BC3CE5DEB4B /* Q3ESense.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Q3ESense.h; sourceTree = "<group>"; };
 		B37EAC3671887DAF3EDA3E61 /* ARKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ARKit.framework; path = System/Library/Frameworks/ARKit.framework; sourceTree = SDKROOT; };
 		C5D108124494B7628C9E0274 /* AppShell_vision.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AppShell_vision.h; sourceTree = "<group>"; };
 		CC068F6D19C4D3A25A2F1769 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
@@ -143,6 +153,7 @@
 				0483C33116F7CC8FE47CF249 /* MoltenVK.xcframework in Frameworks */,
 				CC2360F670973D2F94B4B7EC /* Metal.framework in Frameworks */,
 				50264BE0BB5AD8D131B1F438 /* CompositorServices.framework in Frameworks */,
+				D7CAE270F9A1F18745DE45A3 /* CoreHaptics.framework in Frameworks */,
 				F5A8D69144D801CC3C3DF4C2 /* ARKit.framework in Frameworks */,
 				0D365B0D21B3A71F87B95D8F /* QuartzCore.framework in Frameworks */,
 				F528A6701C9D048A982F5BEA /* IOSurface.framework in Frameworks */,
@@ -192,6 +203,7 @@
 				6D5BA427322AB0E1A8E703A0 /* AVFoundation.framework */,
 				F0B388950920F898909CA77E /* CompositorServices.framework */,
 				36CC490E0E38BA5D925C297D /* CoreGraphics.framework */,
+				4A1541D0C217EEA9000A1CC4 /* CoreHaptics.framework */,
 				8D1F0066AA4E688EA48C2FC3 /* CoreMotion.framework */,
 				CDB03F055C45BB54AD8A402B /* CoreVideo.framework */,
 				5612936E65EAA6B94B487548 /* Foundation.framework */,
@@ -240,8 +252,13 @@
 				6E5EFFD7864F142C8CA4394D /* Q3EBlackBox.m */,
 				D9374DF16DD2EDCE039B7896 /* Q3EImmersive.h */,
 				F19A3D9E8C56D2A21796B565 /* Q3EImmersive.m */,
+				ADA1A34160030BC3CE5DEB4B /* Q3ESense.h */,
+				0ADAE52C6540EF5EE6D5E4C4 /* Q3ESense.m */,
 				27ED7D3368034171C2632367 /* Q3EVision-Bridging-Header.h */,
 				67CF1E724A295E5D5A7E8C41 /* Q3EVisionApp.swift */,
+				53607DA651BDB962425979D5 /* Q3EVR.h */,
+				04DCD76BF71B991FD24804E6 /* Q3EVR.m */,
+				8DAAA39E4A34C35AC99FD4F8 /* Q3EVRGlue.c */,
 			);
 			path = "shell-visionos";
 			sourceTree = "<group>";
@@ -371,6 +388,9 @@
 				E5568D9988CF9852B7A5F5C9 /* AppShell_vision.m in Sources */,
 				AFD85AD72972E99E7C2D1DEA /* Q3EBlackBox.m in Sources */,
 				1EE7471BB794DF2CF1EBDE05 /* Q3EImmersive.m in Sources */,
+				AD7C0A4FEDEAECBBB3E9A430 /* Q3ESense.m in Sources */,
+				840DF7FBBCC199983E43949D /* Q3EVR.m in Sources */,
+				1EE6BF55E4A4D33160540B67 /* Q3EVRGlue.c in Sources */,
 				3B61A3E8638070FB91F6E292 /* Q3EVisionApp.swift in Sources */,
 				5C925608C75E3EA7EE5EE114 /* ios_audio.m in Sources */,
 				46B51525D7D2D4AC369CFC1E /* ios_console.m in Sources */,

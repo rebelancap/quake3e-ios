@@ -1,0 +1,55 @@
+--- a/code/client/client.h
++++ b/code/client/client.h
+@@ -289,6 +289,9 @@
+ 	int			g_humanplayers;
+ 	int			g_needpass;
+ 	int			auth;		// Urban Terror: server requires an account
++	int			bots;		// Urban Terror: bot count, its browser's "Bots" filter
++	int			password;	// Urban Terror: private server, its "Private" filter
++	char		modversion[MAX_NAME_LENGTH];	// Urban Terror: g_modversion, e.g. "4.3.4"
+ } serverInfo_t;
+ 
+ typedef struct {
+--- a/code/client/cl_main.c
++++ b/code/client/cl_main.c
+@@ -2470,6 +2470,10 @@
+ 	server->punkbuster = 0;
+ 	server->g_humanplayers = 0;
+ 	server->g_needpass = 0;
++	server->auth = 0;
++	server->bots = 0;
++	server->password = 0;
++	server->modversion[0] = '\0';
+ }
+ 
+ #define MAX_SERVERSPERPACKET	256
+@@ -4230,6 +4234,9 @@
+ 			server->g_humanplayers = atoi(Info_ValueForKey(info, "g_humanplayers"));
+ 			server->g_needpass = atoi(Info_ValueForKey(info, "g_needpass"));
+ 			server->auth = atoi(Info_ValueForKey(info, "auth"));
++			server->bots = atoi(Info_ValueForKey(info, "bots"));
++			server->password = atoi(Info_ValueForKey(info, "password"));
++			Q_strncpyz(server->modversion, Info_ValueForKey(info, "modversion"), MAX_NAME_LENGTH);
+ 		}
+ 		server->ping = ping;
+ 	}
+--- a/code/client/cl_ui.c
++++ b/code/client/cl_ui.c
+@@ -370,6 +370,17 @@
+ 		Info_SetValueForKey( info, "g_needpass", va("%i", server->g_needpass));
+ 		Info_SetValueForKey( info, "g_humanplayers", va("%i", server->g_humanplayers));
+ 		Info_SetValueForKey( info, "auth", va("%i", server->auth));
++		// Urban Terror's browser reads three more keys than stock Quake III
++		// puts back into this infostring (ioUrbanTerror cl_ui.c, LAN_GetServerInfo).
++		// "modversion" is the load-bearing one: its ui.qvm compares it against
++		// ui_modversion and drops every server that does not match, so with the key
++		// absent the internet list came back empty — measured on the macOS oracle,
++		// 2026-08-19: 0 of 622 servers listed without it, 206 with it, and no other
++		// key changed the count. "bots" and "password" back the browser's Bots and
++		// Private filters and its lock column.
++		Info_SetValueForKey( info, "bots", va("%i", server->bots));
++		Info_SetValueForKey( info, "password", va("%i", server->password));
++		Info_SetValueForKey( info, "modversion", server->modversion);
+ 		Q_strncpyz(buf, info, buflen);
+ 	} else {
+ 		if (buf) {

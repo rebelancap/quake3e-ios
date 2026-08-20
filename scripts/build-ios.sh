@@ -18,6 +18,18 @@ REF=$ROOT/build/oracle-vk/release-darwin-aarch64
 [ -d "$OVERLAY/code" ] || { echo "FATAL: overlay missing — run scripts/sync-overlay.sh"; exit 1; }
 [ -d "$REF/client" ] || { echo "FATAL: reference macOS vk build missing — run scripts/build-oracle.sh"; exit 1; }
 
+# Dev gate parity with publish-ota.sh: a FOUR-component version is a dev build
+# and gets the Remote Console switch. Without this, a cable deploy silently
+# replaced the OTA build with one MISSING the switch (bitten 2026-08-20).
+# publish-ota.sh still owns the variable when it drives this script.
+if [ -z "${Q3E_DEV_DEFS+x}" ]; then
+  case "$(plutil -extract CFBundleShortVersionString raw "$SPIKE/Info.plist")" in
+    *.*.*.*) export Q3E_DEV_DEFS='$(inherited) Q3E_DEV_BUILD=1'
+             echo "== dev version detected: Remote Console switch INCLUDED ==" ;;
+    *)       export Q3E_DEV_DEFS="" ;;
+  esac
+fi
+
 SDKPATH=$(xcrun --sdk iphoneos --show-sdk-path)
 CC=$(xcrun --sdk iphoneos -f clang)
 BASEFLAGS="-isysroot $SDKPATH -arch arm64 -miphoneos-version-min=16.0 -O2 -DNDEBUG -fvisibility=hidden -pipe -Wno-implicit-function-declaration"

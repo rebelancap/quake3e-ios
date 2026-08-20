@@ -1,0 +1,262 @@
+--- a/code/renderervk/tr_scene.c
++++ b/code/renderervk/tr_scene.c
+@@ -585,10 +585,11 @@
+ // that shipped the anchor changed nothing anyone could see.
+ #define VR_GUN_REST_REF (-12.6875f)
+ 
+-// A mod is free to ship a weapon whose bounds are nonsense. The correction is
+-// clamped before it is scaled, so the worst a bad model can do is sit at the end
+-// of its leash instead of in the next room. baseq3's largest correction is the
+-// grenade launcher's 11.3 units, comfortably inside this.
++// A mod is free to ship a weapon whose bounds are nonsense. The anchor point is
++// clamped before anything is scaled about it, so the worst a bad model can do is
++// sit at the end of its leash instead of in the next room. baseq3's largest
++// forward correction is the grenade launcher's 11.3 units, and its largest
++// sideways/vertical one is the BFG's 14.7 down, both comfortably inside this.
+ #define VR_GUN_ANCHOR_LIMIT (16.0f)
+ 
+ static void R_VRRebaseViewmodel( const refdef_t *fd )
+@@ -597,7 +598,8 @@
+ 	float relOrigin[3], relAxis[3][3];
+ 	const float d2r = (float)(M_PI / 180.0);
+ 	float sp, cp, sy, cy, sr, cr;
+-	float rearF, fwdF, bestLen, correction;
++	float rearF, fwdF, bestLen, pivot[3], gunView[3], gunMins[3], gunMaxs[3];
++	const trRefEntity_t *gunEnt;
+ 	int i, j, n, haveGun;
+ 
+ 	vk_vr_gun_entities = 0;
+@@ -643,6 +645,25 @@
+ 
+ 	n = r_numentities - r_firstSceneEntity;
+ 
++	// --- the grip anchor, and the point Weapon Size scales about (patch 0020) -
++	// R3.6. The anchor below is the point of the gun that the hand holds, and it
++	// is used for TWO things at once, which is the whole change:
++	//
++	//   1. it is subtracted from every entity's view-relative position, so that
++	//      point — and not the game view's own origin, which is a point in the
++	//      player's face — is what lands at the hand;
++	//   2. because it is subtracted BEFORE the Weapon Size multiply, it is also
++	//      the point that multiply pivots about. A bigger gun grows away from
++	//      the fist in every direction instead of sliding out of it.
++	//
++	// The second half is the bug this round fixes: scaling about the view origin
++	// moved the grip by (scale - 1) x its own offset from that origin, roughly
++	// six units forward and seven down for the machinegun across the row's
++	// range — so every Weapon Size change had to be paid for with a Grip Right
++	// and a Grip Up correction. The grip offsets are applied to the hand in
++	// UNSCALED units (above), on purpose and unchanged: they are where the hand
++	// holds the gun, not part of the gun, so their meaning is size-invariant.
++	//
+ 	// --- the resting rear-plane anchor (overlay patch 0019) -----------------
+ 	// Where a weapon's rear plane — the end nearest the player, the end a hand
+ 	// actually holds — ends up is the sum of TWO per-weapon numbers, and both
+@@ -680,6 +701,10 @@
+ 	fwdF = 0.0f;
+ 	bestLen = 0.0f;
+ 	haveGun = 0;
++	gunEnt = NULL;
++	VectorClear( gunView );
++	VectorClear( gunMins );
++	VectorClear( gunMaxs );
+ 	for ( i = 0; i < n; i++ ) {
+ 		const trRefEntity_t *ent = &backEndData->entities[ r_firstSceneEntity + i ];
+ 		vec3_t mins, maxs, d;
+@@ -710,32 +735,53 @@
+ 		}
+ 		rearF = centerF - extentF;
+ 
+-		// ...and where the cgame hung that box, in the same axis.
++		// ...and where the cgame hung that box, in the view's own three axes.
+ 		VectorSubtract( ent->e.origin, fd->vieworg, d );
+-		fwdF = DotProduct( d, fd->viewaxis[0] );
++		for ( k = 0; k < 3; k++ )
++			gunView[k] = DotProduct( d, fd->viewaxis[k] );
++		fwdF = gunView[0];
++		VectorCopy( mins, gunMins );
++		VectorCopy( maxs, gunMaxs );
++		gunEnt = ent;
+ 		haveGun = 1;
+ 	}
+ 	vk_vr_gun_rear = rearF;
+ 	vk_vr_gun_fwd = fwdF;
+ 	vk_vr_gun_rest = fwdF + rearF;
++	VectorClear( pivot );
+ 	vk_vr_gun_anchor = 0.0f;
+ 	if ( haveGun && vk_vr_gun_anchor_on ) {
+-		correction = VR_GUN_REST_REF - vk_vr_gun_rest;
+-		if ( correction >  VR_GUN_ANCHOR_LIMIT ) correction =  VR_GUN_ANCHOR_LIMIT;
+-		if ( correction < -VR_GUN_ANCHOR_LIMIT ) correction = -VR_GUN_ANCHOR_LIMIT;
+-		// Scaled with the weapon, because the model is: Weapon Size multiplies
+-		// the same geometry this correction is measured from.
+-		vk_vr_gun_anchor = correction * vk_vr_gun_scale;
+-	}
+-	VectorMA( org, vk_vr_gun_anchor, hand[0], org );
++		// FORWARD: the rear plane, leashed to within VR_GUN_ANCHOR_LIMIT of the
++		// machinegun's own resting one — the same leash R3.5 put on the slide it
++		// computed, said the other way round, because a slide of `REF - rest`
++		// clamped to +/-16 is exactly a rest clamped to REF +/- 16.
++		pivot[0] = vk_vr_gun_rest;
++		if ( pivot[0] > VR_GUN_REST_REF + VR_GUN_ANCHOR_LIMIT ) pivot[0] = VR_GUN_REST_REF + VR_GUN_ANCHOR_LIMIT;
++		if ( pivot[0] < VR_GUN_REST_REF - VR_GUN_ANCHOR_LIMIT ) pivot[0] = VR_GUN_REST_REF - VR_GUN_ANCHOR_LIMIT;
++		// LEFT and UP: `tag_weapon` itself, which is where the cgame's own hands
++		// model holds this weapon and therefore the best statement anyone has
++		// made about where a fist closes on it. R3.5 declined to anchor the up
++		// axis on the BOTTOM PLANE, and that reasoning stands — how high a hand
++		// holds a gun does not grow with how tall its receiver is — but the tag
++		// is not the bottom plane: it is the attachment point, it spans seven
++		// units across baseq3 (the BFG hangs that much lower than the
++		// machinegun), and anchoring it is what stops Weapon Size from dragging
++		// the gun down and out of the fist.
++		for ( j = 1; j < 3; j++ ) {
++			pivot[j] = gunView[j];
++			if ( pivot[j] >  VR_GUN_ANCHOR_LIMIT ) pivot[j] =  VR_GUN_ANCHOR_LIMIT;
++			if ( pivot[j] < -VR_GUN_ANCHOR_LIMIT ) pivot[j] = -VR_GUN_ANCHOR_LIMIT;
++		}
++		// What the pivot costs the assembly along forward, for VIEWMODELNOW:
++		// the same number R3.5 reported as the slide, now a consequence of where
++		// the scale pivots rather than a translation of its own.
++		vk_vr_gun_anchor = -pivot[0] * vk_vr_gun_scale;
++	}
+ 	//
+-	// The UP axis is deliberately NOT anchored this way. Measured across every
+-	// baseq3 weapon, the bottom planes span about two units (-3.9 to -6.2, the
+-	// gauntlet's glove aside) against nearly nine along forward, and the height
+-	// a hand holds a gun at does not grow with how tall the receiver is — so
+-	// bottom-plane alignment would push tall models up and short ones down for
+-	// no reported symptom, against a Grip Up value that already reads right on
+-	// every weapon. Left measured from the origin, as the cgame places it.
++	// With the anchor bypassed (`q3evranchor 0`) the pivot is all zeros, which
++	// is the game view's own origin — exactly the placement every build before
++	// 1.0.4.10 drew, Weapon Size scaling about the player's face and all. That
++	// is what makes the A/B honest: off is the old behaviour, not a third one.
+ 	for ( i = 0; i < n; i++ ) {
+ 		trRefEntity_t *ent = &backEndData->entities[ r_firstSceneEntity + i ];
+ 		vec3_t d;
+@@ -743,11 +789,11 @@
+ 		if ( !( ent->e.renderfx & RF_FIRST_PERSON ) )
+ 			continue;
+ 
+-		// Where this entity sits relative to the game view, in the view's own
++		// Where this entity sits relative to the ANCHOR POINT, in the view's own
+ 		// axes. Orthonormal, so the inverse is the dot products.
+ 		VectorSubtract( ent->e.origin, fd->vieworg, d );
+ 		for ( j = 0; j < 3; j++ )
+-			relOrigin[j] = DotProduct( d, fd->viewaxis[j] ) * vk_vr_gun_scale;
++			relOrigin[j] = ( DotProduct( d, fd->viewaxis[j] ) - pivot[j] ) * vk_vr_gun_scale;
+ 		for ( j = 0; j < 3; j++ ) {
+ 			relAxis[j][0] = DotProduct( ent->e.axis[j], fd->viewaxis[0] );
+ 			relAxis[j][1] = DotProduct( ent->e.axis[j], fd->viewaxis[1] );
+@@ -776,7 +822,7 @@
+ 			vec3_t lo;
+ 			VectorSubtract( ent->e.lightingOrigin, fd->vieworg, d );
+ 			for ( j = 0; j < 3; j++ )
+-				relOrigin[j] = DotProduct( d, fd->viewaxis[j] ) * vk_vr_gun_scale;
++				relOrigin[j] = ( DotProduct( d, fd->viewaxis[j] ) - pivot[j] ) * vk_vr_gun_scale;
+ 			VectorCopy( org, lo );
+ 			for ( j = 0; j < 3; j++ )
+ 				VectorMA( lo, relOrigin[j], hand[j], lo );
+@@ -796,6 +842,39 @@
+ 		vk_vr_gun_entities++;
+ 	}
+ 	vk_vr_gun_mounted = ( vk_vr_gun_entities > 0 );
++
++	// Where the anchor point ACTUALLY ended up, measured off the transformed
++	// entity rather than predicted from the inputs — the difference between an
++	// assertion and a decoration. Everything here is read back out of the gun
++	// entity the loop above has already rewritten: its final origin, its final
++	// axes (which carry the Weapon Size multiply, hence nonNormalizedAxes), and
++	// the box those axes belong to. So a build that scaled about the wrong point
++	// reports the wrong number, and one that stopped applying the pivot at all
++	// reports the number it would have had.
++	//
++	// The answer is stated in the hand's own frame, relative to the raw hand
++	// origin: with the anchor on it must equal the three Grip offsets exactly,
++	// at EVERY Weapon Size. That is what "the gun pivots at the fist" means as a
++	// measurement — and with `q3evranchor 0` it moves by (scale x the offset),
++	// which is the fault injection for it.
++	VectorClear( vk_vr_gun_pivot );
++	if ( gunEnt != NULL && vk_vr_gun_mounted ) {
++		vec3_t centerW, d;
++		float extentAlong = 0.0f, c, h;
++
++		VectorCopy( gunEnt->e.origin, centerW );
++		for ( j = 0; j < 3; j++ ) {
++			c = 0.5f * ( gunMins[j] + gunMaxs[j] );
++			h = 0.5f * ( gunMaxs[j] - gunMins[j] );
++			VectorMA( centerW, c, gunEnt->e.axis[j], centerW );
++			extentAlong += fabs( h * DotProduct( gunEnt->e.axis[j], hand[0] ) );
++		}
++		VectorSubtract( centerW, vk_vr_hand_world, d );
++		vk_vr_gun_pivot[0] = DotProduct( d, hand[0] ) - extentAlong;
++		VectorSubtract( gunEnt->e.origin, vk_vr_hand_world, d );
++		vk_vr_gun_pivot[1] = -DotProduct( d, hand[1] );	// hand[1] is LEFT
++		vk_vr_gun_pivot[2] =  DotProduct( d, hand[2] );
++	}
+ }
+ #endif
+ 
+--- a/code/renderervk/tr_local.h
++++ b/code/renderervk/tr_local.h
+@@ -734,6 +734,7 @@
+ extern float vk_vr_gun_fwd;		// R3.5: where the cgame hung it, along the view forward
+ extern float vk_vr_gun_rest;		// R3.5: the sum — the rear plane the anchor corrects
+ extern int   vk_vr_gun_anchor_on;	// R3.5: the `q3evranchor` A/B
++extern float vk_vr_gun_pivot[3];	// R3.6: where the anchor point landed, hand frame
+ void VK_SetVRGunAnchor( int on );
+ void VK_VRGunString( char *buf, int size );
+ 
+--- a/code/renderervk/vk.c
++++ b/code/renderervk/vk.c
+@@ -3343,10 +3343,15 @@
+ float vk_vr_hand_axis[2][3][3];              // body-frame hand basis, Q3 convention
+ int   vk_vr_aim_hand = 1;                    // 0 = left, 1 = right
+ float vk_vr_gun_scale = 1.0f;                // the Weapon Size row
+-// R3.4: the numbers the maintainer dialled on glass. Forward is unchanged — the
+-// rear-plane anchor (tr_scene.c) is referenced to the machinegun, so this value
+-// still means what it meant while it was being tuned.
+-float vk_vr_grip[3] = { -8.0f, -2.5f, 4.0f };        // forward, right, up (units)
++// R3.6: the grip offsets are measured from the ANCHOR POINT now (tr_scene.c),
++// so all three changed meaning in the same round and all three are restated
++// here. Forward is a DISTANCE FORWARD OF THE HAND and zero — the shipped
++// default — puts the weapon's rear plane at the fist. R3.7 then hardcoded right
++// (-0.5), up (0) and pitch (0) in the shell: the anchor made them a calibration
++// nobody moved, and these are the same numbers Q3E_VR_SetGripQuiet now forces.
++// The shell overwrites all six from NSUserDefaults at boot; these are what a
++// build with no store at all draws with.
++float vk_vr_grip[3] = { 0.0f, -0.5f, 0.0f };         // forward, right, up (units)
+ float vk_vr_grip_angles[3] = { 0.0f, 0.0f, 0.0f };   // pitch, yaw, roll (degrees)
+ // What the last re-base actually did, for VIEWMODELNOW. Reporting the values
+ // that went IN would read identically on a build where the re-base never ran.
+@@ -3363,6 +3368,10 @@
+ float vk_vr_gun_fwd = 0.0f;                  // where the cgame hung it, view forward
+ float vk_vr_gun_rest = 0.0f;                 // the sum the anchor actually corrects
+ int   vk_vr_gun_anchor_on = 1;               // the `q3evranchor` A/B
++// R3.6: the anchor point as MEASURED off the transformed gun — see the readback
++// at the end of R_VRRebaseViewmodel. Equals the three grip offsets at every
++// Weapon Size when the anchor is on, which is the assertion the suite makes.
++float vk_vr_gun_pivot[3] = { 0.0f, 0.0f, 0.0f };
+ static VkImage     q3s_eye_depth[2];         // per-eye DEPTH snapshots
+ static VkImageView q3s_eye_depth_view[2];
+ static int         q3s_depth_copies = 0;
+@@ -8369,7 +8378,8 @@
+ 	Com_sprintf( buf, size,
+ 		"aimhand=%s handvalid=(L%d,R%d) mounted=%d entities=%d "
+ 		"hand=(%.1f,%.1f,%.1f)u gun=(%.1f,%.1f,%.1f)u gunang=(p%.1f,y%.1f,r%.1f)deg "
+-		"fwd=%.1fu rear=%.1fu rest=%.1fu anchor=%+.1fu anch=%s depthhack=off",
++		"fwd=%.1fu rear=%.1fu rest=%.1fu anchor=%+.1fu anch=%s "
++		"pivot=(f%+.2f,r%+.2f,u%+.2f)u depthhack=off",
+ 		vk_vr_aim_hand ? "right" : "left",
+ 		vk_vr_hand_valid[0], vk_vr_hand_valid[1],
+ 		vk_vr_gun_mounted, vk_vr_gun_entities,
+@@ -8377,7 +8387,8 @@
+ 		vk_vr_gun_origin[0], vk_vr_gun_origin[1], vk_vr_gun_origin[2],
+ 		vk_vr_gun_angles[0], vk_vr_gun_angles[1], vk_vr_gun_angles[2],
+ 		vk_vr_gun_fwd, vk_vr_gun_rear, vk_vr_gun_rest, vk_vr_gun_anchor,
+-		vk_vr_gun_anchor_on ? "on" : "off" );
++		vk_vr_gun_anchor_on ? "on" : "off",
++		vk_vr_gun_pivot[0], vk_vr_gun_pivot[1], vk_vr_gun_pivot[2] );
+ }
+ 
+ // The `q3evranchor` A/B. Off restores exactly the placement the cgame asked for,

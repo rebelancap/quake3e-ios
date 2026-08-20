@@ -1,0 +1,47 @@
+--- a/code/client/cl_cgame.c
++++ b/code/client/cl_cgame.c
+@@ -911,6 +911,28 @@
+ }
+ 
+ 
++// --- the interactive scoreboard, made visible to the engine ------------------
++//
++// The hold-TAB scoreboard is cgame state (cg.showScores) and the cgame is a QVM
++// this project never forks, so until now the engine could only see the two
++// AUTOMATIC scoreboards — PM_DEAD and the two intermission pm_types. That gap
++// had a visible cost in the visionOS VR layer, whose 2D layer splits the 640x480
++// virtual screen into head-locked bands tuned for the ORDINARY HUD: a full-screen
++// scoreboard drawn while those bands are up is torn across two quads at two
++// scales, which is exactly what the device round reported (upper rows small,
++// lower rows large and offset).
++//
++// The scoreboard is toggled by two commands the cgame registers with the ENGINE
++// and the engine dispatches here, so the state is observable without a syscall
++// and without touching the VM: +scores raises it, -scores lowers it. Recorded
++// only when the cgame actually CLAIMED the command, so a mod that does not
++// register them (or a stray console line) never sets the flag.
++//
++// Cleared by CL_ClearState's caller path via the consumer's own CA_ACTIVE gate:
++// a key held across a map change releases into a different cgame, and the
++// consumer refuses to answer at all unless the connection is live.
++int cl_vr_scores_held = 0;
++
+ /*
+ ====================
+ CL_GameCommand
+@@ -928,6 +950,15 @@
+ 
+ 	bRes = (qboolean)VM_Call( cgvm, 0, CG_CONSOLE_COMMAND );
+ 
++	if ( bRes ) {
++		const char *cmd = Cmd_Argv( 0 );
++		if ( !Q_stricmp( cmd, "+scores" ) ) {
++			cl_vr_scores_held = 1;
++		} else if ( !Q_stricmp( cmd, "-scores" ) ) {
++			cl_vr_scores_held = 0;
++		}
++	}
++
+ 	Cbuf_NestedReset();
+ 
+ 	return bRes;

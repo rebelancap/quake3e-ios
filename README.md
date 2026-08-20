@@ -1,9 +1,11 @@
 # Quake3e for iPhone & Apple Vision Pro
 
 Play **Quake III Arena** on your iPhone and Apple Vision Pro — full single-player
-bot ladder, real internet multiplayer, mods, and a stereoscopic **3D mode** on
-Vision Pro that puts the game on a floating screen in your room with real depth.
-100% vibe coded with lots of passion and attention to detail.
+bot ladder, real internet multiplayer, mods, and on Vision Pro both a
+stereoscopic **3D mode** (the game on a floating screen with real depth) and a
+full **immersive VR mode**: you stand inside the arena, world-locked and
+head-tracked, aiming with your gaze, a gamepad, or PlayStation VR2 Sense
+controllers. 100% vibe coded with lots of passion and attention to detail.
 
 Built on [Quake3e](https://github.com/ec-/Quake3e), the maintained,
 performance-focused ioquake3 engine, running its native Vulkan renderer on Metal.
@@ -67,6 +69,22 @@ automatically from servers that offer them.
   world-locked stereoscopic panel with real depth, controller-aimed, with
   live-tunable screen size, distance, height, stereo depth, crosshair distance,
   and room dimming; sound follows the screen
+- **Apple Vision Pro VR mode** — full immersion: stand inside the arena at real
+  scale, world-locked and head-tracked at native refresh.
+  - **Three ways to aim**: your gaze (crosshair follows where you look),
+    **PlayStation VR2 Sense controllers** (true hand aim with haptics — the gun
+    is in your hand), or classic **gamepad aiming** (stick turns the view,
+    crosshair dead center, just like flat Quake)
+  - World-space crosshair at real depth along your aim, never swallowed by
+    geometry; the weapon model rides your hand with per-weapon anchoring
+  - HUD and menus on an in-world panel — size, height, and on/off all tunable;
+    scoreboard scales to fit full servers
+  - Comfort & tuning: snap or smooth turn, movement direction (head / aim),
+    height calibration with trim, render quality up to 2×, CAS sharpening,
+    Show Hands, damage-flash toggle, one-tap recenter
+  - Multiplayer, mods (CPMA, OSP, Urban Terror…), and the whole single-player
+    ladder all work in VR; hardware keyboards type into the game, and the
+    visionOS keyboard pops up on text fields automatically
 
 ## Requirements
 
@@ -85,9 +103,45 @@ and opacity, refresh rate, FPS counter, and the Vision Pro 3D screen options.
 ≡ button (top-right) is ESC/menu. 3-finger tap: on-screen keyboard. Menus: just
 tap.
 
-**Controller:** left stick move, right stick look, RT fire, LT zoom, A jump,
-X use, bumpers switch weapons, menu = ESC. Everything is rebindable in the
-standard Quake III controls menu.
+**Controller:** left stick moves, right stick looks, and every button presses an
+ordinary Quake III key — see **Gamepad bindings** below.
+
+## Gamepad bindings
+
+Every pad button simply presses a key; what that key *does* is a normal Quake III
+bind, so you can lay the pad out however you like from the console or from your
+own `autoexec.cfg` — in vanilla or in any mod (`q3ut4`, `cpma`, ...):
+
+    bind AUX1 "+zoom"
+    bind AUX2 "weapon 7"
+
+| Gamepad button    | Key pressed |
+|-------------------|-------------|
+| RT                | MOUSE1      |
+| LT                | MOUSE2      |
+| A                 | SPACE       |
+| B                 | AUX6        |
+| X                 | ENTER       |
+| Y                 | AUX1        |
+| LB                | [           |
+| RB                | ]           |
+| L3                | c           |
+| R3                | AUX7        |
+| D-pad up          | AUX2        |
+| D-pad down        | AUX3        |
+| D-pad left        | AUX4        |
+| D-pad right       | AUX5        |
+| Options (VIEW)    | TAB         |
+| Menu (START)      | ESCAPE      |
+
+Two of these arrive pre-bound so the pad works out of the box: `AUX6` to
+`+movedown` (B crouches) and `AUX7` to `centerview` (R3 recentres the view).
+They are ordinary binds — your own bind for either one simply replaces it.
+
+One catch: the in-game *Controls* menu cannot capture a pad press, because in
+menus the pad becomes the navigation controller (d-pad and left stick move
+between items, A confirms, B goes back, RT clicks). Bind pad keys by name from
+the console or an `autoexec.cfg` instead.
 
 ## Shortcuts (one-tap mod launchers)
 

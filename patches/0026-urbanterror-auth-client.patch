@@ -1,0 +1,256 @@
+--- a/code/ui/ui_public.h
++++ b/code/ui/ui_public.h
+@@ -32,6 +32,10 @@
+ 	char			servername[MAX_STRING_CHARS];
+ 	char			updateInfoString[MAX_STRING_CHARS];
+ 	char			messageString[MAX_STRING_CHARS];
++	// Urban Terror account login: the mod's ui.qvm reads the address of the
++	// server it is on straight out of this struct (ioUrbanTerror, @Barbatos).
++	// Appended last, so every field before it keeps its offset.
++	char			serverAddress[MAX_STRING_CHARS];
+ } uiClientState_t;
+ 
+ typedef enum {
+@@ -123,8 +127,18 @@
+ 	UI_LAN_COMPARESERVERS,
+ 	// 1.32
+ 	UI_FS_SEEK,
+-	UI_SET_PBCLSTATUS,
++	UI_SET_PBCLSTATUS,	// == 87
+ 
++	// Urban Terror's auth traps, at the ordinals ioUrbanTerror gave them (88-93)
++	// — the range between UI_SET_PBCLSTATUS and UI_FLOOR that stock Quake III
++	// never used. A UI module that does not know them never calls them.
++	UI_NET_STRINGTOADR,	// == 88
++	UI_Q_VSNPRINTF,
++	UI_NET_SENDPACKET,
++	UI_COPYSTRING,
++	UI_SYS_STARTPROCESS,
++	UI_NET_COMPAREBASEADR,	// == 93
++
+ 	UI_FLOOR = 107,
+ 	UI_CEIL,
+ 
+@@ -187,7 +201,11 @@
+ // if !overlay, the background will be drawn, otherwise it will be
+ // overlayed over whatever the cgame has drawn.
+ // a GetClientState syscall will be made to get the current strings
+-	
++
++	// Urban Terror: an auth-server reply arrived. Same ordinal as
++	// ioUrbanTerror, and a UI that does not export it is simply never called.
++	UI_AUTHSERVER_PACKET,
++
+ 	UI_EXPORT_LAST,
+ } uiExport_t;
+ 
+--- a/code/client/client.h
++++ b/code/client/client.h
+@@ -288,6 +288,7 @@
+ 	int			punkbuster;
+ 	int			g_humanplayers;
+ 	int			g_needpass;
++	int			auth;		// Urban Terror: server requires an account
+ } serverInfo_t;
+ 
+ typedef struct {
+@@ -381,6 +382,15 @@
+ extern	vm_t			*cgvm;	// interface to cgame dll or vm
+ extern	vm_t			*uivm;	// interface to ui dll or vm
+ extern	int				cl_uiTextFieldQueryTime;	// ms at the last UI overstrike query = a menu text field has focus
++
++// Urban Terror account login. cl_auth_engine is the flag the mod's UI tests to
++// decide whether to offer the login at all; authc/authl ride to the server in
++// the userinfo once the QVM has logged in.
++extern	cvar_t			*cl_auth_engine;
++extern	cvar_t			*cl_auth;
++extern	cvar_t			*cl_authDebug;
++extern	cvar_t			*authc;
++extern	cvar_t			*authl;
+ extern	refexport_t		re;		// interface to refresh .dll
+ 
+ 
+--- a/code/client/cl_ui.c
++++ b/code/client/cl_ui.c
+@@ -32,6 +32,45 @@
+ // that case. Zero until the UI module asks for the first time.
+ int cl_uiTextFieldQueryTime = 0;
+ 
++// Urban Terror's ui.qvm passes a pointer to its OWN netadr_t for the engine to
++// fill in (UI_NET_STRINGTOADR below). That struct is Quake III's original
++// IPv4-only one and this engine's is IPv6-capable and more than twice its size,
++// so nothing may be written through that pointer in the engine's own layout —
++// it would run sixteen bytes past the end of the mod's buffer and corrupt the
++// VM heap. Everything crossing the boundary is repacked into these 12 bytes.
++// The two enums also disagree: id's original starts NA_BOT, NA_BAD and this
++// engine starts NA_BAD, NA_BOT, so the type is mapped rather than cast.
++#define VM_NA_BOT		0
++#define VM_NA_BAD		1
++#define VM_NA_LOOPBACK	2
++#define VM_NA_BROADCAST	3
++#define VM_NA_IP		4
++
++typedef struct {
++	int32_t		type;
++	byte		ip[4];
++	uint16_t	port;
++	uint16_t	pad;
++} vmNetadr_t;
++
++typedef char vmNetadr_is_the_legacy_size[ (sizeof(vmNetadr_t) == 12) ? 1 : -1 ];
++
++static int CL_UI_PackNetadr( vmNetadr_t *out, const netadr_t *in ) {
++	Com_Memset( out, 0, sizeof( *out ) );
++	switch ( in->type ) {
++		case NA_BOT:		out->type = VM_NA_BOT; break;
++		case NA_LOOPBACK:	out->type = VM_NA_LOOPBACK; break;
++		case NA_BROADCAST:	out->type = VM_NA_BROADCAST; break;
++		case NA_IP:			out->type = VM_NA_IP; break;
++		// IPv6 has no representation in a QVM built in 1999. Telling the mod
++		// the lookup failed is the honest answer; it will not try to send.
++		default:			out->type = VM_NA_BAD; return 0;
++	}
++	Com_Memcpy( out->ip, in->ipv._4, 4 );
++	out->port = in->port;
++	return 1;
++}
++
+ /*
+ ====================
+ GetClientState
+@@ -43,6 +82,9 @@
+ 	Q_strncpyz( state->servername, cls.servername, sizeof( state->servername ) );
+ 	Q_strncpyz( state->updateInfoString, cls.updateInfoString, sizeof( state->updateInfoString ) );
+ 	Q_strncpyz( state->messageString, clc.serverMessage, sizeof( state->messageString ) );
++	// Urban Terror's auth UI sends its packets from the address of the server
++	// it is playing on; nothing else reads this.
++	Q_strncpyz( state->serverAddress, NET_AdrToString( &clc.serverAddress ), sizeof( state->serverAddress ) );
+ 	state->clientNum = cl.snap.ps.clientNum;
+ }
+ 
+@@ -327,6 +369,7 @@
+ 		Info_SetValueForKey( info, "punkbuster", va("%i", server->punkbuster));
+ 		Info_SetValueForKey( info, "g_needpass", va("%i", server->g_needpass));
+ 		Info_SetValueForKey( info, "g_humanplayers", va("%i", server->g_humanplayers));
++		Info_SetValueForKey( info, "auth", va("%i", server->auth));
+ 		Q_strncpyz(buf, info, buflen);
+ 	} else {
+ 		if (buf) {
+@@ -1176,6 +1219,58 @@
+ 	case UI_VERIFY_CDKEY:
+ 		return Com_CDKeyValidate(VMA(1), VMA(2));
+ 
++	// ---- Urban Terror account login (ioUrbanTerror, @Barbatos/@Kalish) ----
++	// The whole auth protocol lives inside FrozenSand's closed ui.qvm: it builds
++	// its own datagrams and hands them to us addressed as a string. All the
++	// engine owns is the socket, the name resolution and the wake-up call.
++	case UI_NET_STRINGTOADR:
++		{
++			netadr_t adr;
++			// NA_IP, not NA_UNSPEC: an IPv6 answer is useless to a QVM that has
++			// nowhere to put one.
++			if ( !NET_StringToAdr( VMA(1), &adr, NA_IP ) ) {
++				return 0;
++			}
++			return CL_UI_PackNetadr( VMA(2), &adr );
++		}
++
++	case UI_NET_SENDPACKET:
++		{
++			netadr_t adr;
++			const char *dest = VMA(4);
++			if ( !NET_StringToAdr( dest, &adr, NA_UNSPEC ) ) {
++				Com_Printf( S_COLOR_YELLOW "auth: cannot resolve '%s'\n", dest );
++				return 0;
++			}
++			if ( cl_authDebug && cl_authDebug->integer ) {
++				Com_Printf( "AUTH send %i bytes -> %s (%s)\n",
++					(int)args[2], dest, NET_AdrToStringwPort( &adr ) );
++			}
++			NET_SendPacket( args[1], args[2], VMA(3), &adr );
++		}
++		return 0;
++
++	case UI_NET_COMPAREBASEADR:
++		{
++			const vmNetadr_t *a = VMA(1), *b = VMA(2);
++			return ( a->type == b->type && !memcmp( a->ip, b->ip, 4 ) );
++		}
++
++	// ioUrbanTerror hands the QVM's va_list straight to vsnprintf, which cannot
++	// work on a 64-bit host — a QVM's varargs are 4-byte cells, not a native
++	// va_list. Refusing loudly beats corrupting the stack; if a UI ever calls
++	// this we will see it in the log rather than in a crash report.
++	case UI_Q_VSNPRINTF:
++		Com_Printf( S_COLOR_YELLOW "auth: UI_Q_VSNPRINTF is not supported on this build\n" );
++		return 0;
++
++	// Both are no-ops in ioUrbanTerror too: CopyString'ing into engine memory
++	// gives the VM a pointer it cannot use, and starting a process is not a
++	// thing an iOS app may do.
++	case UI_COPYSTRING:
++	case UI_SYS_STARTPROCESS:
++		return 0;
++
+ 	// engine extensions
+ 	case UI_R_ADDREFENTITYTOSCENE2:
+ 		re.AddRefEntityToScene( VMA(1), qtrue );
+--- a/code/client/cl_main.c
++++ b/code/client/cl_main.c
+@@ -66,6 +66,13 @@
+ cvar_t	*cl_lanForcePackets;
+ 
+ cvar_t	*cl_guidServerUniq;
++
++// Urban Terror account login — see cl_ui.c for what the engine's share of it is.
++cvar_t	*cl_auth_engine;
++cvar_t	*cl_auth;
++cvar_t	*cl_authDebug;
++cvar_t	*authc;
++cvar_t	*authl;
+ 
+ cvar_t	*cl_dlURL;
+ cvar_t	*cl_dlDirectory;
+@@ -2868,6 +2875,16 @@
+ 		return qfalse;
+ 	}
+ 
++	// Urban Terror's auth server answering the mod's login. The packet is
++	// already tokenized, which is how the QVM reads it (trap_Argv).
++	if ( uivm && strstr( c, "AUTH:CL" ) ) {
++		if ( cl_authDebug && cl_authDebug->integer ) {
++			Com_Printf( "AUTH recv from %s: %s\n", NET_AdrToStringwPort( from ), s );
++		}
++		VM_Call( uivm, 1, UI_AUTHSERVER_PACKET, 0 );
++		return qfalse;
++	}
++
+ 	Com_DPrintf( "Unknown connectionless packet command.\n" );
+ 	return qfalse;
+ }
+@@ -4015,6 +4032,17 @@
+ 
+ 	cl_guidServerUniq = Cvar_Get( "cl_guidServerUniq", "1", CVAR_ARCHIVE_ND );
+ 	Cvar_SetDescription( cl_guidServerUniq, "Makes cl_guid unique for each server." );
++
++	// Urban Terror account login. cl_auth_engine is read-only and exists purely
++	// so the mod's UI knows the engine can carry its auth traps; the QVM owns
++	// everything else and writes authc/authl once a login succeeds.
++	cl_auth_engine = Cvar_Get( "cl_auth_engine", "1", CVAR_TEMP | CVAR_ROM );
++	Cvar_SetDescription( cl_auth_engine, "Read-only: this engine supports the Urban Terror auth traps." );
++	cl_auth = Cvar_Get( "cl_auth", "0", CVAR_TEMP | CVAR_ROM );
++	authc = Cvar_Get( "authc", "0", CVAR_TEMP | CVAR_USERINFO );
++	authl = Cvar_Get( "authl", "", CVAR_TEMP | CVAR_USERINFO );
++	cl_authDebug = Cvar_Get( "cl_authDebug", "0", CVAR_TEMP );
++	Cvar_SetDescription( cl_authDebug, "Log every auth packet the mod sends and receives." );
+ 
+ 	cl_dlURL = Cvar_Get( "cl_dlURL", "http://ws.q3df.org/maps/download/%1", CVAR_ARCHIVE_ND );
+ 	Cvar_SetDescription( cl_dlURL, "Cvar must point to download location." );
+@@ -4201,6 +4229,7 @@
+ 			server->punkbuster = atoi(Info_ValueForKey(info, "punkbuster"));
+ 			server->g_humanplayers = atoi(Info_ValueForKey(info, "g_humanplayers"));
+ 			server->g_needpass = atoi(Info_ValueForKey(info, "g_needpass"));
++			server->auth = atoi(Info_ValueForKey(info, "auth"));
+ 		}
+ 		server->ping = ping;
+ 	}

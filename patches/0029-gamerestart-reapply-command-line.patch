@@ -1,0 +1,24 @@
+--- a/code/qcommon/common.c
++++ b/code/qcommon/common.c
+@@ -3051,6 +3051,21 @@
+ 		// Load new configuration
+ 		Com_ExecuteCfg();
+ 
++		// ...and let the command line win over it, exactly as Com_Init does
++		// right after its own Com_ExecuteCfg(). Without this the config files
++		// silently beat every +set from the moment of the first connect:
++		// FS_ConditionalRestart() lands here on EVERY gamestate (the checksum
++		// feed changes per connect, so it restarts even when the game dir did
++		// not), and it runs immediately before CL_InitDownloads().
++		//
++		// Measured on device 2026-08-20: the iOS shell boots with
++		// "+set cl_allowDownload 1", but the Urban Terror config imported from
++		// the desktop carries seta cl_allowDownload "0". Connecting re-exec'd
++		// it, so CL_InitDownloads() saw 0, printed "you are missing some files
++		// referenced by the server", skipped the download entirely and dropped
++		// with "CM_LoadMap: couldn't load maps/ut4_casa_bots.bsp".
++		Com_StartupVariable( NULL );
++
+ #ifndef DEDICATED
+ 		if ( clientRestart )
+ 			CL_StartHunkUsers();

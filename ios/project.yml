@@ -112,6 +112,7 @@ targets:
         embed: false
       - sdk: Metal.framework
       - sdk: CompositorServices.framework
+      - sdk: CoreHaptics.framework
       - sdk: ARKit.framework
       - sdk: QuartzCore.framework
       - sdk: IOSurface.framework

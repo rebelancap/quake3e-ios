@@ -1,0 +1,117 @@
+--- a/code/renderervk/tr_local.h
++++ b/code/renderervk/tr_local.h
+@@ -660,6 +660,17 @@
+ extern float cl_vr_xhair_range;		// units the aim ray reached before it stopped
+ extern float vk_vr_xhair_scale;		// angular size multiplier, from the settings row
+ extern int   vk_vr_ui_redirect;		// this frame's 2D belongs on the UI layer
++// --- overlay patch 0022: the Damage Flash row (R4.3 item 3) ----------------
++// Quake III's damage blend is drawn by the cgame QVM, not by the engine: there
++// is no cvar behind it and no engine code that knows it happened. What the
++// engine CAN see is the 2D pic itself — id's cgame draws it with a shader it
++// registers under one fixed name, and every mod that descends from that source
++// (CPMA and OSP among them) keeps the name. So the gate lives at the one place
++// every 2D pic passes through, keyed on the shader's own name.
++extern int   vk_vr_damage_flash;	// 0 = drop the cgame's blood-blend pic
++extern int   vk_vr_damage_seen;		// blood-blend pics offered, this session
++extern int   vk_vr_damage_dropped;	// ...and how many the gate actually dropped
++int  VK_VRIsDamageBlend( qhandle_t hShader );
+ extern int   vk_vr_ui_frames;		// UI layer snapshots taken
+ // --- overlay patch 0015: sky diagnostics (R2.3 fix 5) ----------------------
+ // Two DIFFERENTIAL toggles and one dump. The device renders the sky only
+--- a/code/renderervk/vk.c
++++ b/code/renderervk/vk.c
+@@ -3457,6 +3457,45 @@
+ float vk_vr_mvp_last[16];
+ int   vk_vr_mvp_pushes = 0;
+ 
++// --- overlay patch 0022 (R4.3 item 3) ---------------------------------------
++// An ENGINE-side global for the same reason vk_vr_xhair_scale is one: the shell
++// that owns the settings row is linked only into the visionOS app, and these
++// sources are compiled for the oracle and the iPhone build as well.
++int vk_vr_damage_flash = 1;
++int vk_vr_damage_seen = 0;
++int vk_vr_damage_dropped = 0;
++void VK_SetVRDamageFlash( int on ) {
++	vk_vr_damage_flash = on ? 1 : 0;
++}
++// Is this handle the cgame's damage blend?
++//
++// Keyed on the shader's NAME, which is the only thing about it this engine can
++// know: the blend belongs to the cgame QVM, it is registered at map load like
++// any other piece of media, and "viewBloodBlend" is the name id's own cgame
++// registers it under — inherited, unchanged, by the mods that descend from that
++// source (verified against CPMA 1.53's own cgame.qvm).
++//
++// Deliberately NOT a handle cached at registration time: handles are reissued
++// on every vid_restart and every fs_game change, and a cached one gone stale
++// stops gating — or gates something else — with nothing to show for it.
++int VK_VRIsDamageBlend( qhandle_t hShader ) {
++	const shader_t *sh;
++	if ( hShader <= 0 )
++		return 0;
++	sh = R_GetShaderByHandle( hShader );
++	if ( sh == NULL || sh->name[0] != 'v' )
++		return 0;
++	return !Q_stricmp( sh->name, "viewBloodBlend" );
++}
++// Returns the number of blood-blend pics SEEN and writes the number DROPPED.
++// Both, because "off and nothing dropped" and "off and never offered" are
++// different states and only the pair tells them apart.
++int VK_GetVRDamageBlends( int *dropped ) {
++	if ( dropped )
++		*dropped = vk_vr_damage_dropped;
++	return vk_vr_damage_seen;
++}
++
+ int vk_vr_ui_redirect = 0;                   // shell: this frame is a VR WORLD frame
+ int vk_vr_ui_frames = 0;                     // UI layer snapshots taken (freshness)
+ static VkImage     q3s_ui_image = VK_NULL_HANDLE;
+--- a/code/renderervk/tr_cmds.c
++++ b/code/renderervk/tr_cmds.c
+@@ -232,6 +232,21 @@
+ 	if ( !tr.registered ) {
+ 		return;
+ 	}
++	// --- overlay patch 0022: the Damage Flash row (R4.3 item 3) ------------
++	// A cgame that draws its damage blend as a 2D pic is gated here; one that
++	// draws it as a scene sprite is gated in RE_AddRefEntityToScene. The
++	// predicate is the same one in both places — see VK_VRIsDamageBlend.
++	//
++	// SEEN is counted whether or not the draw is dropped, and dropped is
++	// counted separately: "off and nothing to drop" and "off and no longer
++	// dropping" are different failures, and only the pair tells them apart.
++	if ( VK_VRIsDamageBlend( hShader ) ) {
++		vk_vr_damage_seen++;
++		if ( !vk_vr_damage_flash ) {
++			vk_vr_damage_dropped++;
++			return;
++		}
++	}
+ 	cmd = R_GetCommandBuffer( sizeof( *cmd ) );
+ 	if ( !cmd ) {
+ 		return;
+--- a/code/renderervk/tr_scene.c
++++ b/code/renderervk/tr_scene.c
+@@ -228,6 +228,22 @@
+ 	}
+ 	if ( (unsigned)ent->reType >= RT_MAX_REF_ENTITY_TYPE ) {
+ 		ri.Error( ERR_DROP, "RE_AddRefEntityToScene: bad reType %i", ent->reType );
++	}
++
++	// --- overlay patch 0022: the Damage Flash row (R4.3 item 3) ------------
++	// id's cgame draws the damage blend as a SPRITE in the scene, sized and
++	// offset by the damage direction, rather than as a 2D pic — so the gate has
++	// to be here as well as in RE_StretchPic. Both, and not just this one: the
++	// two are different cgame implementations of the same thing, this port
++	// cannot see which one a given mod chose, and a gate that only covers the
++	// shape baseq3 happens to use is the mod-unsafe answer this row was
++	// specifically asked not to be. See VK_VRIsDamageBlend.
++	if ( VK_VRIsDamageBlend( ent->customShader ) ) {
++		vk_vr_damage_seen++;
++		if ( !vk_vr_damage_flash ) {
++			vk_vr_damage_dropped++;
++			return;
++		}
+ 	}
+ 
+ 	backEndData->entities[r_numentities].e = *ent;

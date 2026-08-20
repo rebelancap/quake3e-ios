@@ -1,0 +1,140 @@
+--- a/code/client/cl_input.c
++++ b/code/client/cl_input.c
+@@ -693,6 +693,107 @@
+ 	}
+ 	cl_vr_height_rise = applied;
+ }
++
++// --- head aim (R2 "Convenience Mode") ---------------------------------------
++//
++// With no hand controllers, the head IS the aim: the camera comes from the
++// published head pose regardless of what cl.viewangles says, so an aim that
++// never follows the head is a defect the player feels on every shot. Writing
++// the head's absolute yaw/pitch into the SAME accumulator the usercmd reads
++// makes "where the game thinks I am aiming" and "what my eyes are pointed at"
++// the same number, every frame, with no protocol change: the server still
++// only ever sees ordinary view angles.
++int   cl_vr_head_aim_active = 0;   // 1 whenever VR owns the aim this frame
++float cl_vr_head_yaw = 0.0f;       // degrees, head yaw relative to the VR base
++float cl_vr_head_pitch = 0.0f;     // degrees, head pitch, +/-90 already
++float cl_vr_body_yaw = 0.0f;       // degrees, the accumulator head-aim rides on
++                                    // (published for AIMNOW; the identity
++                                    // sent == body+head is what the suite
++                                    // asserts stays true across a spawn)
++// Fault injection (`q3evrheadaim 0`): the hook everything above depends on,
++// switchable at runtime so the AIMNOW identity assertion can be proven to
++// FAIL against a build that does not apply it, rather than trusted on the
++// strength of reading the code (R0.1's lesson: an assertion nobody has seen
++// fail is not known to test anything). Defaults on; only the console command
++// ever turns it off.
++int   cl_vr_head_aim_hook_enabled = 1;
++// R2.1 cut-list: set for exactly the FIRST frame after head-aim activates
++// (VR entry, or a mode re-arm) and consumed by CL_CreateCmd's pitch
++// wrap-clamp, which runs immediately after this function and would otherwise
++// see that frame's intentional absolute pitch write as a spike — see the
++// clamp's own comment.
++int   cl_vr_head_aim_first_frame = 0;
++
++/*
++=================
++CL_VRApplyHeadAim
++
++Runs LAST — after CL_VRTurn and every other look contributor (mouse, stick,
++touch, gyro) has already landed its delta in cl.viewangles[YAW] this frame —
++so whatever any of them did is absorbed into the BODY yaw rather than fought:
++a stick turn rotates render, aim and movement together instead of being
++overwritten by the head's own absolute write below.
++
++Additive body accumulation is what survives a respawn or teleport, the same
++reason CL_VRTurn is additive: pmove interprets the usercmd's angles plus the
++playerstate's own delta_angles, so nothing here needs to know a spawn just
++happened — the SERVER's forced view snap moves cl.viewangles once (via the
++normal delta-angle path other input already rides), this function reads
++whatever that produced as "this frame's delta" exactly like a stick turn, and
++folds it into the body the same way. There is no separate spawn case to get
++wrong.
++
++Pitch and roll are the head's alone (roll is not a meaningful aim axis in this
++game and is left at 0); yaw is body + head so turning the body (stick) and
++turning the head (looking around) compose instead of one erasing the other.
++=================
++*/
++static void CL_VRApplyHeadAim( void )
++{
++	static float lastSent = 0.0f;
++	static int   yawInit = 1;
++	float delta;
++
++	if ( !cl_vr_head_aim_active || !cl_vr_head_aim_hook_enabled ) {
++		yawInit = 1;   // re-arm: the next activation re-seeds from where aim is
++		return;
++	}
++
++	if ( yawInit ) {
++		// First head-aim frame (VR entry, or a mode re-arm): the body adopts
++		// whatever direction the player is already aiming, minus wherever the
++		// head happens to be pointed right now, so turning head-aim on changes
++		// nothing about where the player is looking.
++		yawInit = 0;
++		cl_vr_body_yaw = AngleMod( cl.viewangles[YAW] - cl_vr_head_yaw );
++		lastSent = cl.viewangles[YAW];
++		// This frame's pitch write below is an intentional ABSOLUTE jump to
++		// wherever the head actually is — it has nothing to do with the
++		// PREVIOUS input source's pitch (mouse-look before VR took over, or
++		// whatever the last mode-arm left behind) and can easily differ from
++		// it by more than 90 degrees with no tracking spike involved at all.
++		// CL_CreateCmd's wrap-clamp runs right after this function and
++		// cannot tell that apart from a real spike on its own; this flag is
++		// how it is told, for exactly one frame.
++		cl_vr_head_aim_first_frame = 1;
++	}
++
++	// Whatever this frame's turn/mouse/touch/spawn-snap path did to the yaw
++	// since the last head-aim frame, folded into the body rather than lost
++	// under the head's own absolute write below.
++	//
++	// R2.1 cut-list: AngleDelta (q_math.c) is the engine's own bounded
++	// degree-delta helper (AngleNormalize360 underneath is a single integer-
++	// modulo computation, not a loop) — used here instead of a second
++	// hand-rolled wrap loop identical to the one Q3EVRGlue.c also carried.
++	delta = AngleDelta( cl.viewangles[YAW], lastSent );
++	cl_vr_body_yaw = AngleMod( cl_vr_body_yaw + delta );
++
++	cl.viewangles[YAW]   = AngleMod( cl_vr_body_yaw + cl_vr_head_yaw );
++	cl.viewangles[PITCH] = cl_vr_head_pitch;
++	cl.viewangles[ROLL]  = 0.0f;
++	lastSent = cl.viewangles[YAW];
++}
+ #endif // USE_VULKAN_API
+ 
+ 
+@@ -794,11 +895,29 @@
+ 	// lands after every look contributor and before the vector is finished.
+ 	CL_VRTurn();
+ 	CL_VRHeightClamp();
++	// Head aim runs LAST of the three, after the turn stick has had its say,
++	// and BEFORE the pitch wrap-clamp below — which then polices the head's
++	// absolute pitch write the same way it already polices the mouse, rather
++	// than being a second clamp that could disagree with the first.
++	CL_VRApplyHeadAim();
+ 	cl_vr_move_pre_f = cmd.forwardmove;
+ 	cl_vr_move_pre_r = cmd.rightmove;
+ #endif
+ 
+ 	// check to make sure the angles haven't wrapped
++#ifdef USE_VULKAN_API
++	// R2.1 cut-list: skip this clamp for exactly the frame CL_VRApplyHeadAim
++	// flagged — its first-activation write is an intentional absolute jump
++	// to wherever the head already is, not a tracking spike, and comparing
++	// it against oldAngles[PITCH] (captured before that write, from whatever
++	// UNRELATED input source had the pitch a moment earlier) would otherwise
++	// clamp away up to the whole first frame's correct value. Consumed
++	// immediately so every ORDINARY frame — including a genuine spike — is
++	// still policed exactly as before.
++	if ( cl_vr_head_aim_first_frame ) {
++		cl_vr_head_aim_first_frame = 0;
++	} else
++#endif
+ 	if ( cl.viewangles[PITCH] - oldAngles[PITCH] > 90 ) {
+ 		cl.viewangles[PITCH] = oldAngles[PITCH] + 90;
+ 	} else if ( oldAngles[PITCH] - cl.viewangles[PITCH] > 90 ) {

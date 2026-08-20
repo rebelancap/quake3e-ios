@@ -1,0 +1,384 @@
+--- a/code/client/cl_input.c
++++ b/code/client/cl_input.c
+@@ -735,6 +735,20 @@
+ // state in which the effective-pitch identity measurably opens after a
+ // respawn, which is what proves the assertion is testing something.
+ int   cl_vr_head_pitch_delta_enabled = 1;
++// Overlay patch 0016 (hands): set by the shell for exactly the frame on which
++// the aim moves between the head and a tracked hand. That frame's pitch write is
++// an intentional ABSOLUTE jump from one source's pitch to the other's — a hand
++// held at the hip and a gaze at the horizon are easily more than 90 degrees
++// apart with no tracking spike involved — and CL_CreateCmd's wrap-clamp cannot
++// tell that from a spike on its own. It is told, for one frame, through the same
++// mechanism the first activation and a changed delta_angles already use.
++//
++// The YAW needs no such amnesty and gets none: the body accumulator below reads
++// whatever moved cl.viewangles since the last frame and folds it in, so a
++// changed aim offset moves the AIM (which is the point of picking the
++// controllers up) and leaves the body — and therefore the camera — exactly where
++// it was. The world does not turn when the aim source changes.
++int   cl_vr_aim_source_changed = 0;
+ // SHORT2ANGLE(16000), spelled out: the exact pitch limit PM_UpdateViewAngles
+ // enforces on the effective view angle. Not a rounded-down "about 87" —
+ // clamping SHORT of the engine's own limit would cost aim the game does allow,
+@@ -848,6 +862,13 @@
+ 	if ( deltaPitch != lastDeltaPitch ) {
+ 		cl_vr_head_aim_first_frame = 1;
+ 		lastDeltaPitch = deltaPitch;
++	}
++
++	// Overlay patch 0016: the aim just moved between the head and a hand. Same
++	// one-frame amnesty, same reason — see the flag's own comment.
++	if ( cl_vr_aim_source_changed ) {
++		cl_vr_aim_source_changed = 0;
++		cl_vr_head_aim_first_frame = 1;
+ 	}
+ 
+ 	// Whatever this frame's turn/mouse/touch/spawn-snap path did to the yaw
+--- a/code/renderervk/tr_local.h
++++ b/code/renderervk/tr_local.h
+@@ -674,12 +674,34 @@
+ extern int   vk_vr_sky_acc_open;	// DrawSkyBox ignores the accumulated bounds
+ extern int   vk_vr_sky_cull_open;	// R_RecursiveWorldNode skips its plane tests
+ void VK_VRSkyString( char *buf, int size );
++
++// --- overlay patch 0016: the hands, and the gun that rides one -------------
++// Published through the same rendezvous as the eyes, in the same body frame.
++extern int   vk_vr_hand_valid[2];	// 0 = that hand is not tracked this frame
++extern float vk_vr_hand_offset[2][3];	// body-frame offset, game units
++extern float vk_vr_hand_axis[2][3][3];	// body-frame hand basis, Q3 convention
++extern int   vk_vr_aim_hand;		// 0 = left, 1 = right
++extern float vk_vr_gun_scale;		// the Weapon Size row
++extern float vk_vr_grip[3];		// forward, right, up, in the hand's own frame
++extern float vk_vr_grip_angles[3];	// pitch, yaw, roll, degrees
++// What the last re-base DID (identity, not intent) — read by VIEWMODELNOW.
++extern int   vk_vr_gun_entities;
++extern int   vk_vr_gun_mounted;
++extern float vk_vr_gun_origin[3];
++extern float vk_vr_gun_angles[3];
++extern float vk_vr_hand_world[3];
++void VK_VRGunString( char *buf, int size );
+ 
+ // Compose the published per-eye pose over the game's view. The base is the
+ // game's own view origin and a YAW-ONLY body basis: pitch and roll belong to
+ // the head, and taking them from the game view would apply them twice.
+ void R_VRComposeEye( const float vieworg[3], const float viewaxis[3][3], int eye,
+ 					 float outOrigin[3], float outAxis[3][3] );
++// The same composition for a HAND. Deliberately the same function shape and the
++// same body basis: the gun and the eyes are resolved against one frame, so the
++// weapon cannot drift against the world it is held in.
++qboolean R_VRComposeHand( const float vieworg[3], const float viewaxis[3][3], int hand,
++					 float outOrigin[3], float outAxis[3][3] );
+ #endif
+ 
+ typedef struct {
+--- a/code/renderervk/tr_main.c
++++ b/code/renderervk/tr_main.c
+@@ -655,6 +655,53 @@
+ 		VectorMA( outAxis[i], vk_vr_eye_axis[eye][i][2], body[2], outAxis[i] );
+ 	}
+ }
++
++
++/*
++=================
++R_VRComposeHand
++
++The same thing for a hand, and DELIBERATELY the same arithmetic: one body basis,
++one height rise, one place to be wrong. A second derivation for the weapon is
++how a port ends up with a gun that drifts against the world it is held in.
++
++Returns false when that hand is not tracked this frame, which is the caller's
++signal to leave the viewmodel exactly where the cgame put it.
++=================
++*/
++qboolean R_VRComposeHand( const float vieworg[3], const float viewaxis[3][3], int hand,
++						  float outOrigin[3], float outAxis[3][3] )
++{
++	vec3_t body[3];
++	float yaw, s, c;
++	int i;
++
++	if ( hand < 0 || hand > 1 || !vk_vr_hand_valid[hand] )
++		return qfalse;
++
++	yaw = atan2( viewaxis[0][1], viewaxis[0][0] );
++	s = sin( yaw );
++	c = cos( yaw );
++
++	VectorSet( body[0],  c,  s, 0.0f );		// forward
++	VectorSet( body[1], -s,  c, 0.0f );		// left
++	VectorSet( body[2], 0.0f, 0.0f, 1.0f );	// up
++
++	VectorCopy( vieworg, outOrigin );
++	for ( i = 0; i < 3; i++ ) {
++		VectorMA( outOrigin, vk_vr_hand_offset[hand][i], body[i], outOrigin );
++	}
++
++	if ( cl_vr_height_rise != 0.0f )
++		VectorMA( outOrigin, cl_vr_height_rise, body[2], outOrigin );
++
++	for ( i = 0; i < 3; i++ ) {
++		VectorScale( body[0], vk_vr_hand_axis[hand][i][0], outAxis[i] );
++		VectorMA( outAxis[i], vk_vr_hand_axis[hand][i][1], body[1], outAxis[i] );
++		VectorMA( outAxis[i], vk_vr_hand_axis[hand][i][2], body[2], outAxis[i] );
++	}
++	return qtrue;
++}
+ #endif
+ 
+ 
+--- a/code/renderervk/tr_scene.c
++++ b/code/renderervk/tr_scene.c
+@@ -496,6 +496,147 @@
+ 
+ 	RE_AddPolyToScene( tr.vrXhairShader->index, 4, verts, 4 );
+ }
++
++
++/*
++=================
++R_VRRebaseViewmodel
++
++The first-person weapon, moved from the face to the hand — WITHOUT touching the
++cgame, which is a QVM this project never forks.
++
++CG_AddViewWeapon builds the hand, the weapon, the barrel and the muzzle flash as
++ordinary refdef entities carrying RF_FIRST_PERSON, placed relative to the game's
++own view. So their pose relative to that view is exactly the thing to preserve:
++
++    new = handFrame * inverse(viewFrame) * entFrame
++
++Every bob, sway, lag and cg_gun_x/y/z offset the cgame baked in rides along
++unchanged; only what the whole assembly is attached to changes. Nothing here
++needs to know which entity is the gun and which is the flash, which is why a mod
++with a different weapon model works for free.
++
++RUN ONCE PER SCENE, and only ever on a fresh entity array: the transform reads
++each entity's CURRENT pose, so applying it twice would compound. That holds by
++construction — the cgame clears and refills the scene for every field, and this
++runs after the refill and before the render.
++
++DEPTHHACK is not disabled here; the backend already declines it for a VR view
++(patch 0009), which is the right place for it: the gun is a real object at a real
++distance and its true depth is what the compositor must reproject against.
++=================
++*/
++static void R_VRRebaseViewmodel( const refdef_t *fd )
++{
++	vec3_t hand[3], org, f, r, u, nf, nr, nu;
++	float relOrigin[3], relAxis[3][3];
++	const float d2r = (float)(M_PI / 180.0);
++	float sp, cp, sy, cy, sr, cr;
++	int i, j, n;
++
++	vk_vr_gun_entities = 0;
++	vk_vr_gun_mounted = 0;
++
++	if ( !vk_vr_active || ( fd->rdflags & RDF_NOWORLDMODEL ) )
++		return;
++	if ( !R_VRComposeHand( fd->vieworg, fd->viewaxis, vk_vr_aim_hand, org, hand ) )
++		return;		// that hand is not tracked: the cgame's own placement stands
++
++	VectorCopy( org, vk_vr_hand_world );
++
++	// The grip correction. It moves the MODEL only — the aim ray is the raw hand
++	// direction and is computed on the other side of the rendezvous — because a
++	// tuning slider that also moved where the shot goes would be an aiming bug
++	// wearing a cosmetic label.
++	VectorCopy( hand[0], f );
++	VectorCopy( hand[1], r );	// Q3's second axis is LEFT, not right
++	VectorCopy( hand[2], u );
++	sp = sin( vk_vr_grip_angles[0] * d2r ); cp = cos( vk_vr_grip_angles[0] * d2r );
++	sy = sin( vk_vr_grip_angles[1] * d2r ); cy = cos( vk_vr_grip_angles[1] * d2r );
++	sr = sin( vk_vr_grip_angles[2] * d2r ); cr = cos( vk_vr_grip_angles[2] * d2r );
++	// pitch about LEFT: +pitch tips the nose DOWN, matching Quake's own sign
++	for ( i = 0; i < 3; i++ ) { nf[i] = f[i] * cp - u[i] * sp; nu[i] = f[i] * sp + u[i] * cp; }
++	VectorCopy( nf, f ); VectorCopy( nu, u );
++	// yaw about UP: +yaw swings LEFT, matching Quake's own sign
++	for ( i = 0; i < 3; i++ ) { nf[i] = f[i] * cy + r[i] * sy; nr[i] = r[i] * cy - f[i] * sy; }
++	VectorCopy( nf, f ); VectorCopy( nr, r );
++	// roll about FORWARD
++	for ( i = 0; i < 3; i++ ) { nr[i] = r[i] * cr + u[i] * sr; nu[i] = u[i] * cr - r[i] * sr; }
++	VectorCopy( nr, r ); VectorCopy( nu, u );
++
++	// The offsets are stated as forward/RIGHT/up because that is how a person
++	// describes where a gun sits in a fist; the second axis here is LEFT, so the
++	// right component is subtracted.
++	VectorMA( org,  vk_vr_grip[0], f, org );
++	VectorMA( org, -vk_vr_grip[1], r, org );
++	VectorMA( org,  vk_vr_grip[2], u, org );
++
++	VectorCopy( f, hand[0] );
++	VectorCopy( r, hand[1] );
++	VectorCopy( u, hand[2] );
++
++	n = r_numentities - r_firstSceneEntity;
++	for ( i = 0; i < n; i++ ) {
++		trRefEntity_t *ent = &backEndData->entities[ r_firstSceneEntity + i ];
++		vec3_t d;
++
++		if ( !( ent->e.renderfx & RF_FIRST_PERSON ) )
++			continue;
++
++		// Where this entity sits relative to the game view, in the view's own
++		// axes. Orthonormal, so the inverse is the dot products.
++		VectorSubtract( ent->e.origin, fd->vieworg, d );
++		for ( j = 0; j < 3; j++ )
++			relOrigin[j] = DotProduct( d, fd->viewaxis[j] ) * vk_vr_gun_scale;
++		for ( j = 0; j < 3; j++ ) {
++			relAxis[j][0] = DotProduct( ent->e.axis[j], fd->viewaxis[0] );
++			relAxis[j][1] = DotProduct( ent->e.axis[j], fd->viewaxis[1] );
++			relAxis[j][2] = DotProduct( ent->e.axis[j], fd->viewaxis[2] );
++		}
++
++		// ...re-attached to the hand.
++		VectorCopy( org, ent->e.origin );
++		for ( j = 0; j < 3; j++ )
++			VectorMA( ent->e.origin, relOrigin[j], hand[j], ent->e.origin );
++		for ( j = 0; j < 3; j++ ) {
++			VectorScale( hand[0], relAxis[j][0], ent->e.axis[j] );
++			VectorMA( ent->e.axis[j], relAxis[j][1], hand[1], ent->e.axis[j] );
++			VectorMA( ent->e.axis[j], relAxis[j][2], hand[2], ent->e.axis[j] );
++			if ( vk_vr_gun_scale != 1.0f )
++				VectorScale( ent->e.axis[j], vk_vr_gun_scale, ent->e.axis[j] );
++		}
++		if ( vk_vr_gun_scale != 1.0f )
++			ent->e.nonNormalizedAxes = qtrue;
++
++		// RF_LIGHTING_ORIGIN entities light from a point the cgame chose next to
++		// the OLD position; left alone, a weapon carried into a dark corner would
++		// keep the lighting of wherever the player's face is. Moved through the
++		// same transform, so it stays in the same place relative to the model.
++		if ( ent->e.renderfx & RF_LIGHTING_ORIGIN ) {
++			vec3_t lo;
++			VectorSubtract( ent->e.lightingOrigin, fd->vieworg, d );
++			for ( j = 0; j < 3; j++ )
++				relOrigin[j] = DotProduct( d, fd->viewaxis[j] ) * vk_vr_gun_scale;
++			VectorCopy( org, lo );
++			for ( j = 0; j < 3; j++ )
++				VectorMA( lo, relOrigin[j], hand[j], lo );
++			VectorCopy( lo, ent->e.lightingOrigin );
++		}
++
++		if ( vk_vr_gun_entities == 0 ) {
++			VectorCopy( ent->e.origin, vk_vr_gun_origin );
++			// Diagnostics only. vectoangles gives pitch and yaw from the forward
++			// axis and leaves roll at zero; roll comes from the other two. The
++			// engine has no axis-to-angles helper of its own, and adding one for
++			// a dump would be a wider change than the dump is worth.
++			vectoangles( ent->e.axis[0], vk_vr_gun_angles );
++			vk_vr_gun_angles[ROLL] =
++				atan2( ent->e.axis[1][2], ent->e.axis[2][2] ) * 180.0f / M_PI;
++		}
++		vk_vr_gun_entities++;
++	}
++	vk_vr_gun_mounted = ( vk_vr_gun_entities > 0 );
++}
+ #endif
+ 
+ 
+@@ -581,6 +722,14 @@
+ 	tr.refdef.num_entities = r_numentities - r_firstSceneEntity;
+ 	tr.refdef.entities = &backEndData->entities[r_firstSceneEntity];
+ 
++#ifdef USE_VULKAN
++	// visionOS VR (overlay patch 0016): the viewmodel moves from the face to the
++	// hand HERE — after the cgame has finished adding entities for this scene and
++	// before the view is set up, which is the one window in which the whole set
++	// is present and nothing has been culled or transformed yet.
++	R_VRRebaseViewmodel( fd );
++#endif
++
+ 	tr.refdef.num_dlights = r_numdlights - r_firstSceneDlight;
+ 	tr.refdef.dlights = &backEndData->dlights[r_firstSceneDlight];
+ 
+--- a/code/renderervk/vk.c
++++ b/code/renderervk/vk.c
+@@ -3324,6 +3324,26 @@
+ float vk_vr_cull_tangents[2][2];             // what the cull planes encode (measured)
+ float vk_vr_edge_ndc[2][4];                  // where the FINISHED projection puts the
+                                              // requested edges: l, r, b, t in NDC
++// --- overlay patch 0016: the hands ------------------------------------------
++// Published through the SAME rendezvous the eyes come through, in the same body
++// frame and the same units, and written only by the engine thread. That is what
++// lets the viewmodel be mounted on a hand with the eyes' own composition
++// function: one derivation, so the gun and the eyes cannot disagree about where
++// the body is.
++int   vk_vr_hand_valid[2] = { 0, 0 };
++float vk_vr_hand_offset[2][3];               // body-frame offset, game units
++float vk_vr_hand_axis[2][3][3];              // body-frame hand basis, Q3 convention
++int   vk_vr_aim_hand = 1;                    // 0 = left, 1 = right
++float vk_vr_gun_scale = 1.0f;                // the Weapon Size row
++float vk_vr_grip[3] = { -8.0f, -6.0f, 5.0f };        // forward, right, up (units)
++float vk_vr_grip_angles[3] = { -20.0f, 0.0f, 0.0f }; // pitch, yaw, roll (degrees)
++// What the last re-base actually did, for VIEWMODELNOW. Reporting the values
++// that went IN would read identically on a build where the re-base never ran.
++int   vk_vr_gun_entities = 0;                // entities moved on the last scene
++int   vk_vr_gun_mounted = 0;                 // 1 = the hand owned the gun
++float vk_vr_gun_origin[3];
++float vk_vr_gun_angles[3];
++float vk_vr_hand_world[3];
+ static VkImage     q3s_eye_depth[2];         // per-eye DEPTH snapshots
+ static VkImageView q3s_eye_depth_view[2];
+ static int         q3s_depth_copies = 0;
+@@ -8167,6 +8187,59 @@
+ 	vk_vr_eye_index = eye;
+ }
+ 
++// Overlay patch 0016. Same contract as VK_SetVREye and the same caller: one
++// snapshot, one thread, once per engine frame. `valid` 0 means the hand is not
++// tracked this frame — the viewmodel then stays exactly where the cgame put it,
++// which is the R2 behaviour and the correct fallback.
++void VK_SetVRHand( int hand, int valid, const float offset[3], const float axis[9] )
++{
++	int i;
++	if ( hand < 0 || hand > 1 )
++		return;
++	vk_vr_hand_valid[hand] = valid ? 1 : 0;
++	if ( !valid )
++		return;
++	for ( i = 0; i < 3; i++ )
++		vk_vr_hand_offset[hand][i] = offset[i];
++	for ( i = 0; i < 9; i++ )
++		vk_vr_hand_axis[hand][i / 3][i % 3] = axis[i];
++}
++
++void VK_SetVRGun( int aimHand, float scale, const float grip[3], const float gripAngles[3] )
++{
++	int i;
++	vk_vr_aim_hand = aimHand ? 1 : 0;
++	// A scale of zero collapses the model to a point and a negative one turns it
++	// inside out; both are values a slider or a console typo can produce and
++	// neither is recoverable by looking at the result.
++	if ( scale >= 0.1f && scale <= 8.0f )
++		vk_vr_gun_scale = scale;
++	if ( grip ) {
++		for ( i = 0; i < 3; i++ )
++			vk_vr_grip[i] = grip[i];
++	}
++	if ( gripAngles ) {
++		for ( i = 0; i < 3; i++ )
++			vk_vr_grip_angles[i] = gripAngles[i];
++	}
++}
++
++void VK_VRGunString( char *buf, int size )
++{
++	if ( !buf || size <= 0 )
++		return;
++	Com_sprintf( buf, size,
++		"aimhand=%s handvalid=(L%d,R%d) mounted=%d entities=%d "
++		"hand=(%.1f,%.1f,%.1f)u gun=(%.1f,%.1f,%.1f)u gunang=(p%.1f,y%.1f,r%.1f)deg "
++		"depthhack=off",
++		vk_vr_aim_hand ? "right" : "left",
++		vk_vr_hand_valid[0], vk_vr_hand_valid[1],
++		vk_vr_gun_mounted, vk_vr_gun_entities,
++		vk_vr_hand_world[0], vk_vr_hand_world[1], vk_vr_hand_world[2],
++		vk_vr_gun_origin[0], vk_vr_gun_origin[1], vk_vr_gun_origin[2],
++		vk_vr_gun_angles[0], vk_vr_gun_angles[1], vk_vr_gun_angles[2] );
++}
++
+ // Per-eye DEPTH snapshot as a Metal texture, re-resolved on every call for the
+ // same reason the colour accessor is: a vid_restart recreates the images and a
+ // cached pointer would be stale.

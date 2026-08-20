@@ -1,0 +1,166 @@
+--- a/code/renderervk/tr_local.h
++++ b/code/renderervk/tr_local.h
+@@ -659,6 +659,14 @@
+ extern int   cl_vr_xhair_hit;		// 0 = the ray left the map
+ extern float cl_vr_xhair_range;		// units the aim ray reached before it stopped
+ extern float vk_vr_xhair_scale;		// angular size multiplier, from the settings row
++// --- overlay patch 0023 (R4.5): the two marker DIAGNOSTICS -----------------
++// Both inert at their defaults, both reachable only from a dev build. They
++// exist so the "the marker is no longer occludable" claim can be made to fail
++// on demand: push the marker a chosen number of units PAST the surface it
++// named, and optionally put the depth test back, which is the state that used
++// to hide it. See tr_shader.c for the mechanism this reproduces.
++extern float vk_vr_xhair_push;		// units pushed BEYOND the trace hit (0 = shipped)
++extern int   vk_vr_xhair_depthtest;	// 1 = draw through the old depth-TESTED shader
+ extern int   vk_vr_ui_redirect;		// this frame's 2D belongs on the UI layer
+ // --- overlay patch 0022: the Damage Flash row (R4.3 item 3) ----------------
+ // Quake III's damage blend is drawn by the cgame QVM, not by the engine: there
+@@ -1329,6 +1337,7 @@
+ 	shader_t				*defaultShader;
+ 	shader_t				*whiteShader;
+ 	shader_t				*vrXhairShader;
++	shader_t				*vrXhairShaderDepth;	// patch 0023: diagnostic only
+ 	shader_t				*cinematicShader;
+ 	shader_t				*shadowShader;
+ 	shader_t				*projectionShadowShader;
+--- a/code/renderervk/tr_scene.c
++++ b/code/renderervk/tr_scene.c
+@@ -454,7 +454,17 @@
+ 	// biases in the one direction that is always away from whatever was hit, it
+ 	// needs nothing from the trace but the range, and a share of the range is
+ 	// the same bias in DEPTH terms at every distance where a fixed one is not.
++	//
++	// Patch 0023 (R4.5): the pull-back STAYS, even though the marker no longer
++	// depth-tests. It is what keeps the marker's stereo depth on the near side
++	// of the surface it names rather than a hair inside it, and the depth is
++	// the whole reason the marker is a world object at all.
+ 	range = cl_vr_xhair_range - ( ( cl_vr_xhair_range * 0.006f < 1.0f ) ? 1.0f : cl_vr_xhair_range * 0.006f );
++	// Patch 0023 (R4.5), DIAGNOSTIC: zero in every shipped build. A positive
++	// push puts the marker a chosen number of units PAST the surface the trace
++	// stopped at — the same relationship a bezier patch produces on its own,
++	// only deliberate and measurable.
++	range += vk_vr_xhair_push;
+ 	if ( range < 1.0f )
+ 		range = 1.0f;
+ 	VectorMA( fd->vieworg, range, fd->viewaxis[0], ctr );
+@@ -510,7 +520,15 @@
+ 		}
+ 	}
+ 
+-	RE_AddPolyToScene( tr.vrXhairShader->index, 4, verts, 4 );
++	// Patch 0023 (R4.5): the depth-TESTED shader is the diagnostic path, and it
++	// is only ever selected by a dev-build console command. If the diagnostic
++	// shader failed to build, the shipped one is used — a probe is never a
++	// reason to draw nothing.
++	{
++		const shader_t *sh = ( vk_vr_xhair_depthtest && tr.vrXhairShaderDepth != NULL )
++			? tr.vrXhairShaderDepth : tr.vrXhairShader;
++		RE_AddPolyToScene( sh->index, 4, verts, 4 );
++	}
+ }
+ 
+ 
+--- a/code/renderervk/tr_shader.c
++++ b/code/renderervk/tr_shader.c
+@@ -4432,23 +4432,62 @@
+ 	// visionOS VR (overlay patch 0015): the aim marker's own shader.
+ 	//
+ 	// Additive over whatever it lands on, so it is legible against a dark
+-	// corridor and against a lit sky without a second colour scheme. Depth
+-	// TESTED (a marker is occluded by anything genuinely in front of the point
+-	// it names) but never depth WRITING. Two-sided, because a camera-facing
+-	// quad has no meaningful back face and reasoning about winding through a
+-	// Y-flipped projection is exactly how a sibling port spent three rounds
+-	// drawing a geometrically perfect, completely invisible reticle. Untextured
+-	// white with the colour taken from the vertex stream, so nothing depends on
+-	// a texel somebody believed was opaque — the other half of that same bug.
++	// corridor and against a lit sky without a second colour scheme. Never
++	// depth WRITING. Two-sided, because a camera-facing quad has no meaningful
++	// back face and reasoning about winding through a Y-flipped projection is
++	// exactly how a sibling port spent three rounds drawing a geometrically
++	// perfect, completely invisible reticle. Untextured white with the colour
++	// taken from the vertex stream, so nothing depends on a texel somebody
++	// believed was opaque — the other half of that same bug.
++	//
++	// Patch 0023 (R4.5): depth test OFF, and drawn last (SS_NEAREST).
++	//
++	// It used to be depth TESTED, on the reasoning that a marker should be
++	// occluded by anything genuinely in front of the point it names. The point
++	// it names is a COLLISION trace hit, and the collision model is not the
++	// model that gets drawn: curved surfaces are bezier patches, and the patch
++	// collide hull is subdivided to SUBDIVIDE_DISTANCE (16 units, cm_patch.c)
++	// while the rendered mesh is subdivided to r_subdivisions (1 unit). On a
++	// convex patch — a cylinder wall, of which every stock arena has several —
++	// the chorded hull therefore sits up to ~16 units BEHIND the drawn surface,
++	// the trace runs on through the drawn pixels before it stops, and the
++	// marker lands inside the wall. The 0.6%-of-range pull-back in tr_scene.c
++	// is about 3 units at 500, so it never covered that. The reported symptom
++	// is exactly this geometry: the marker vanishes across the belly of a
++	// curved wall and comes back at its edges, where hull and mesh meet again.
++	//
++	// The depth CUE is not lost by turning the test off, because the cue is
++	// stereo: the marker is a world point at the trace range, so both eyes see
++	// it with the disparity that distance implies. What the test bought was
++	// occlusion by intervening geometry, which is worth less than being
++	// reliably visible — an aiming reticle that is sometimes not there is not
++	// an aiming reticle.
+ 	InitShader( "<vr crosshair>", LIGHTMAP_NONE );
+ 	stages[0].bundle[0].image[0] = tr.whiteImage;
+ 	stages[0].bundle[0].tcGen = TCGEN_TEXTURE;
+ 	stages[0].active = qtrue;
+ 	stages[0].bundle[0].rgbGen = CGEN_EXACT_VERTEX;
++	stages[0].stateBits = GLS_DEPTHTEST_DISABLE | GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE;
++	shader.cullType = CT_TWO_SIDED;
++	shader.sort = SS_NEAREST;
++	tr.vrXhairShader = FinishShader();
++
++	// Patch 0023 (R4.5), DIAGNOSTIC: the same marker with the depth test back
++	// on, selected by `q3evrxhairdepth 1` in a dev build. Two shaders rather
++	// than one mutable one because the state bits are baked into a Vulkan
++	// pipeline at FinishShader time; flipping them afterwards changes nothing
++	// the GPU sees. This is what makes the fix's own assertion able to fail:
++	// with it the suite reproduces the hidden marker on demand and then shows
++	// the shipped path drawing the same marker at the same aim.
++	InitShader( "<vr crosshair depth>", LIGHTMAP_NONE );
++	stages[0].bundle[0].image[0] = tr.whiteImage;
++	stages[0].bundle[0].tcGen = TCGEN_TEXTURE;
++	stages[0].active = qtrue;
++	stages[0].bundle[0].rgbGen = CGEN_EXACT_VERTEX;
+ 	stages[0].stateBits = GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE;
+ 	shader.cullType = CT_TWO_SIDED;
+ 	shader.sort = SS_BLEND0;
+-	tr.vrXhairShader = FinishShader();
++	tr.vrXhairShaderDepth = FinishShader();
+ 
+ 	// shadow shader is just a marker
+ 	InitShader( "<stencil shadow>", LIGHTMAP_NONE );
+--- a/code/renderervk/vk.c
++++ b/code/renderervk/vk.c
+@@ -3417,7 +3417,27 @@
+ 	if ( s < 0.0f || s > 8.0f )
+ 		return;
+ 	vk_vr_xhair_scale = s;
++}
++
++// --- overlay patch 0023 (R4.5) ----------------------------------------------
++// The two marker diagnostics. Inert here, so a public build that never
++// registers the commands behaves exactly as if this code were absent: zero
++// push is the shipped placement, and depthtest 0 is the shipped shader.
++float vk_vr_xhair_push = 0.0f;
++int   vk_vr_xhair_depthtest = 0;
++void VK_SetVRXhairProbe( float push, int depthTest ) {
++	// Clamped rather than rejected: this is a probe a human types at a console,
++	// and a silently ignored value reads as "the probe does nothing", which is
++	// the same sentence as the bug it is here to reproduce.
++	if ( push < -512.0f ) push = -512.0f;
++	if ( push >  512.0f ) push =  512.0f;
++	vk_vr_xhair_push = push;
++	vk_vr_xhair_depthtest = depthTest ? 1 : 0;
+ }
++void VK_GetVRXhairProbe( float *push, int *depthTest ) {
++	if ( push ) *push = vk_vr_xhair_push;
++	if ( depthTest ) *depthTest = vk_vr_xhair_depthtest;
++}
+ 
+ // Sky diagnostics (R2.3 fix 5) — see tr_local.h for what each toggle proves.
+ // Both default off; only a dev build registers the commands that set them.

@@ -328,23 +328,46 @@ void Q3E_Immersive_Run(cp_layer_renderer_t layer_renderer)
     ar_data_providers_t providers = ar_data_providers_create_with_data_providers(wtp, NULL);
     ar_session_run(arSession, providers);
 
-    Q3E_BlackBox("imm: render loop started (ARKit world tracking running)");
+    Q3E_BlackBox_Pin("imm: render loop started (ARKit world tracking running)");
     NSLog(@"Q3E-VISION immersive: render loop started");
 
     int running = 1;
+    int dropped = 0;                 // frames the compositor withheld (see below)
     while (running) {
         if (q3e_immStop) {   // button-exit: the shell already reconciled state + is
-            Q3E_BlackBox("imm: stop requested, exiting cleanly (frames=%d)", q3e_immFrameCount);
+            Q3E_BlackBox_Pin("imm: stop requested, exiting cleanly (frames=%d)", q3e_immFrameCount);
             running = 0; continue;   // waiting for us before it dismisses the space
         }
         switch (cp_layer_renderer_get_state(layer_renderer)) {
-            case cp_layer_renderer_state_paused:
+            case cp_layer_renderer_state_paused: {
                 Q3E_BlackBox("imm: state=paused, waiting (frames so far=%d)", q3e_immFrameCount);
+                // BOUND THIS WAIT. cp_layer_renderer_wait_until_running blocks until the
+                // layer runs again OR is invalidated. If the layer is parked in `paused`
+                // and the invalidation never arrives, this thread sits here forever: the
+                // loop never exits, the dismissal is never reconciled, and the app is
+                // stuck behind a curtain with a parked window. A pause that outlives the
+                // grace period is treated as a dismissal nobody told us about — the safe
+                // reading, since returning from a real pause costs one re-entry while not
+                // returning at all costs the app. The stop flag is re-checked here too:
+                // it is only otherwise read at the top of the loop, so a stop that lands
+                // while paused would wait out the layer.
+                const CFTimeInterval pausedAt = CACurrentMediaTime();
                 cp_layer_renderer_wait_until_running(layer_renderer);
+                if (q3e_immStop) continue;      // handled at the top of the next iteration
+                if (cp_layer_renderer_get_state(layer_renderer) != cp_layer_renderer_state_running
+                    && CACurrentMediaTime() - pausedAt > 2.0) {
+                    Q3E_BlackBox_Pin("imm: LAYER paused >2 s and did not resume — treating it as a "
+                                     "system dismissal and running the normal exit (frames=%d)",
+                                     q3e_immFrameCount);
+                    notifyEnded = 1;
+                    running = 0;
+                    continue;
+                }
                 Q3E_BlackBox("imm: resumed from paused");
                 continue;
+            }
             case cp_layer_renderer_state_invalidated:
-                Q3E_BlackBox("imm: INVALIDATED, exiting (frames=%d)", q3e_immFrameCount);
+                Q3E_BlackBox_Pin("imm: INVALIDATED, exiting (frames=%d)", q3e_immFrameCount);
                 NSLog(@"Q3E-VISION immersive: layer invalidated, exiting loop");
                 notifyEnded = 1;         // Crown dismiss: reconcile shell + SwiftUI state
                 running = 0; continue;
@@ -361,7 +384,29 @@ void Q3E_Immersive_Run(cp_layer_renderer_t layer_renderer)
         if (frame == NULL)
             continue;
 
+        // FRAME VALIDITY. cp_frame_predict_timing() and cp_frame_query_drawable() can
+        // both fail, and a failure does not just mean "no picture this frame": it
+        // INVALIDATES the frame object. Every later call on that frame is API misuse,
+        // and CompositorServices answers misuse with an abort, not an error code:
+        //
+        //   cp_frame_end_submission() failed because the frame is not valid. Are
+        //   failures from calls to cp_frame_query_drawables() or
+        //   cp_frame_predict_timing() properly handled?
+        //
+        // The tidy-looking end_submission that "balances" start_submission is exactly
+        // the misuse. A failed frame is ABANDONED: no end_submission, no cleanup call of
+        // any kind. The next query_next_frame vends a live one; there is nothing to
+        // release. This is a hard crash on any dropped frame — a system alert, a space
+        // transition, memory pressure — so it is not a rare path.
         cp_frame_timing_t timing = cp_frame_predict_timing(frame);
+        if (timing == NULL) {
+            dropped++;
+            if (dropped == 1)
+                Q3E_BlackBox_Pin("imm: COMPOSITOR withheld frame timing at frame %d — frame "
+                                 "abandoned (NOT ended: ending an invalidated frame aborts)",
+                                 q3e_immFrameCount);
+            continue;
+        }
         cp_frame_start_update(frame);
         cp_frame_end_update(frame);
         // Pace to the compositor's optimal input time (design notes §6). Without this the loop
@@ -377,7 +422,12 @@ void Q3E_Immersive_Run(cp_layer_renderer_t layer_renderer)
         cp_drawable_t drawable = cp_frame_query_drawable(frame);
 #pragma clang diagnostic pop
         if (drawable == NULL) {
-            cp_frame_end_submission(frame);
+            // Abandon — see the frame-validity note above. Do NOT end submission.
+            dropped++;
+            if (dropped == 1)
+                Q3E_BlackBox_Pin("imm: COMPOSITOR withheld a drawable at frame %d — frame "
+                                 "abandoned (NOT ended: ending an invalidated frame aborts)",
+                                 q3e_immFrameCount);
             continue;
         }
 
@@ -396,7 +446,7 @@ void Q3E_Immersive_Run(cp_layer_renderer_t layer_renderer)
                   (t0.device == sysdev),
                   (unsigned long)t0.pixelFormat,
                   (unsigned long)cp_drawable_get_depth_texture(drawable, 0).pixelFormat);
-            Q3E_BlackBox("imm DIAG: drawableDev=%p reg=%llu sysDefault=%p reg=%llu SAME=%d colorFmt=%lu depthFmt=%lu views=%zu",
+            Q3E_BlackBox_Pin("imm DIAG: drawableDev=%p reg=%llu sysDefault=%p reg=%llu SAME=%d colorFmt=%lu depthFmt=%lu views=%zu",
                   t0.device, (unsigned long long)t0.device.registryID,
                   sysdev, (unsigned long long)sysdev.registryID,
                   (int)(t0.device == sysdev),
@@ -589,7 +639,7 @@ void Q3E_Immersive_Run(cp_layer_renderer_t layer_renderer)
             [enc endEncoding];
         }
         if (q3e_immFrameCount == 2 || (q3e_immFrameCount % 240) == 0)
-            Q3E_BlackBox("imm: rateMaps=%zu texCount=%zu | 0007 — FBO=%lux%lu pairs=%d rendFrames=%d | eyeL=%d eyeR=%d | srcFmt=%lu drawLin=%d mips=%lu",
+            Q3E_BlackBox("imm: rateMaps=%zu texCount=%zu | 0007 — FBO=%lux%lu pairs=%d rendFrames=%d | eyeL=%d eyeR=%d | srcFmt=%lu drawLin=%d mips=%lu dropped=%d",
                          nRateMaps,
                          cp_drawable_get_texture_count(drawable),
                          (unsigned long)(monoTex ? monoTex.width : 0),
@@ -598,7 +648,8 @@ void Q3E_Immersive_Run(cp_layer_renderer_t layer_renderer)
                          (int)(eyeTex[0] != nil), (int)(eyeTex[1] != nil),
                          (unsigned long)(monoTex ? monoTex.pixelFormat : 0),
                          (int)q3e_drawableLinear,
-                         (unsigned long)(eyeTex[0] ? eyeTex[0].mipmapLevelCount : 0));
+                         (unsigned long)(eyeTex[0] ? eyeTex[0].mipmapLevelCount : 0),
+                         dropped);
 
         cp_drawable_encode_present(drawable, command_buffer);
         [command_buffer commit];
@@ -611,6 +662,9 @@ void Q3E_Immersive_Run(cp_layer_renderer_t layer_renderer)
         } // @autoreleasepool
     }
 
+    Q3E_BlackBox_Pin("imm: render loop ended (frames=%d dropped=%d notifyEnded=%d)",
+                     q3e_immFrameCount, dropped, notifyEnded);
+    Q3E_BlackBox_Flush();                      // unthrottled: the exit sequence must land
     if (notifyEnded) Q3E_Immersive_Ended();   // Crown/system dismissal path only
     q3e_immRunning = 0;                        // signal the shell LAST, after cleanup
 }

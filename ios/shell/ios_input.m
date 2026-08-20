@@ -27,13 +27,27 @@
 #import <QuartzCore/CABase.h>   // CACurrentMediaTime
 #import <GameController/GameController.h>
 #import <CoreMotion/CoreMotion.h>
+#if TARGET_OS_VISION
+#import "../shell-visionos/Q3ESense.h"
+#import "../shell-visionos/Q3EVR.h"
+// The VR gameplay/menu consumer of the merged Sense snapshot (Q3EVRGlue.c). It
+// owns context 1 and context 2; the pad layer below owns context 3, and the two
+// are mutually exclusive on the mode.
+void Q3E_VR_SenseInputFrame(float dt);
+// Set by that consumer each frame: 1 when a tracked hand answered and the hands
+// therefore own the turn axis this frame.
+extern int q3e_vr_sense_drives;
+extern int Q3E_VR_ConsumeTurnAxis(float x, float dt);
+#endif
 
 // ---- shims (ios_glue.c) ----
 void Q3E_QueueMouse(int dx, int dy);
 void Q3E_QueueJoyAxis(int axis, int value); // 0=side, 1=forward
 void Q3E_QueueNamedKey(const char *name, int down);
 void Q3E_QueueChar(int ch);
-void Q3E_QueueCommand(const char *cmd); // run a console command (e.g. centerview)
+// (No Q3E_QueueCommand here on purpose: project law is that a pad button
+// synthesizes a distinct engine KEY and nothing else — the action always comes
+// from a bind, never from a command this layer runs behind the player's back.)
 int  Q3E_MenuMode(void); // UI/console catcher active or not in-world
 void Com_Printf(const char *fmt, ...) __attribute__((format(printf, 1, 2))); // engine console out
 const char *Q3E_CurrentGame(void);
@@ -106,8 +120,16 @@ static CMMotionManager *gyro_mgr;
 static float gyro_accx, gyro_accy;
 void Q3E_QueueMouse(int dx, int dy);
 
+// Set by the visionOS shell while VR is active. In VR the head already drives
+// the camera; feeding head rotation into the aim accumulator as well makes the
+// crosshair crawl away on its own with no input at all — the head is moving, and
+// the gyro is reporting it. The feed stays exactly as it is for the 2D window
+// and the 3D panel, where the head does NOT drive the camera and gyro aim is the
+// point. Defined unconditionally so both targets link; only visionOS writes it.
+volatile int q3e_gyro_suppressed = 0;
+
 static void gyro_poll(int menuMode, float dt) {
-    if (gyro_scale <= 0.0f || !gyro_mgr || menuMode) return;
+    if (gyro_scale <= 0.0f || !gyro_mgr || menuMode || q3e_gyro_suppressed) return;
     CMDeviceMotion *m = gyro_mgr.deviceMotion;
     if (!m) return;
     // rotationRate is a per-SECOND rate, so scale by real dt (normalized to
@@ -169,8 +191,10 @@ static int pad_side, pad_forward;              // last sent axis values
 static float pad_lookx, pad_looky;             // sub-pixel accumulators
 static int pad_fire, pad_jump, pad_zoom, pad_wprev, pad_wnext, pad_esc, pad_use;
 static int pad_crouch, pad_scores;             // gameplay crouch ("c") + scores (TAB)
+// Y + d-pad + B + R3: no hardcoded action, they emit AUX1..AUX7 for binding
+static int pad_aux1, pad_aux2, pad_aux3, pad_aux4, pad_aux5, pad_aux6, pad_aux7;
 static int crouch_toggled;                     // L3 toggle-crouch latch
-static int l3_prev, r3_prev;                   // L3/R3 press-edge detect
+static int l3_prev;                            // L3 press-edge detect (crouch latch)
 // menu-mode controller navigation state (separate from the gameplay button
 // states so a mode switch can't leave a key stuck)
 static int   menu_dir_x, menu_dir_y;          // discrete nav direction (-1/0/1)
@@ -223,7 +247,14 @@ static void pad_reset_all(void) {
     pad_button(&pad_esc,   NO, "ESCAPE");
     pad_button(&pad_crouch, NO, "c");
     pad_button(&pad_scores, NO, "TAB");
-    crouch_toggled = 0; l3_prev = 0; r3_prev = 0;
+    pad_button(&pad_aux1, NO, "AUX1");
+    pad_button(&pad_aux2, NO, "AUX2");
+    pad_button(&pad_aux3, NO, "AUX3");
+    pad_button(&pad_aux4, NO, "AUX4");
+    pad_button(&pad_aux5, NO, "AUX5");
+    pad_button(&pad_aux6, NO, "AUX6");
+    pad_button(&pad_aux7, NO, "AUX7");
+    crouch_toggled = 0; l3_prev = 0;
     pad_button(&menu_btnA, NO, "ENTER");
     pad_button(&menu_btnB, NO, "ESCAPE");
     pad_button(&menu_btnX, NO, "SPACE");
@@ -242,17 +273,190 @@ static float pad_deadzone(float v, float m) {
     return v * (m - PAD_DEADZONE) / ((1.0f - PAD_DEADZONE) * m);
 }
 
+// ONE PAD SNAPSHOT PER FRAME, from every source that is driving it (charter D5).
+//
+// The pad used to be read straight out of GCExtendedGamepad and into the button
+// states below. It is now assembled into this snapshot first, so a second source
+// — the PSVR2 Sense pair in 2D/3D mode — can OR its own contribution in and the
+// SINGLE edge detector (pad_button) runs once over the result. Two independent
+// blocks would each emit their own key-down/key-up for one press, and one
+// source's cleanup would cancel the other's held trigger.
+//
+// The structural property that matters: a source that stops contributing simply
+// loses its bits from the snapshot, and pad_button emits the release for free —
+// while a source still holding the key keeps it down. That is what makes a mode
+// boundary safe without an explicit release hook.
+typedef struct {
+    int   have;                 // at least one source answered
+    float lx, ly, rx, ry;       // sticks, GameController convention (Y up-positive)
+    BOOL  fire, zoom, jump, use, wprev, wnext, esc, scores, crouch, l3, r3;
+    BOOL  aux;                  // Y / triangle — no default action, bindable (AUX1)
+    BOOL  dpadU, dpadD, dpadL, dpadR;
+    BOOL  menuClick;            // the menu-mode click button (RT on a pad)
+} q3e_padsnap_t;
+
+// The ordinary gamepad, if there is one. On visionOS a SPATIAL controller is
+// skipped: the Sense pair has its own path, and letting it enumerate as "the
+// gamepad" would make GCController.controllers.firstObject answer with a device
+// that has no extendedGamepad at all — which is how a real pad plugged in
+// alongside a Sense pair goes silently dead.
+static GCController *pad_pick(void) {
+#if TARGET_OS_VISION
+    // Unconditionally, not only when a controller is present: the backend's
+    // start line is what reports whether the SpatialGamepad declaration survived
+    // plist processing into the BUILT product, and the simulator — which has no
+    // controllers at all — is the only place that claim can be checked cheaply.
+    Q3E_Sense_Start();
+    for (GCController *c in GCController.controllers)
+        if (!Q3E_Sense_ShouldIgnorePad((__bridge const void *)c))
+            return c;
+    return nil;
+#else
+    return GCController.controllers.firstObject;
+#endif
+}
+
+#if TARGET_OS_VISION
+// R4.6 — is an ORDINARY gamepad connected? Answered by the SAME scan that
+// decides which device drives the pad, so "the Aiming row is shown" and "the
+// stick this row talks about is the one the pad layer reads" cannot come apart:
+// a spatial controller is filtered out of both by Q3E_Sense_ShouldIgnorePad, so
+// a Sense pair alone never shows the row and never drives this aim.
+//
+// `q3evrpad 0|1` forces the answer, because the simulator has no controllers at
+// all and the row's whole behaviour is its visibility.
+int Q3E_VR_PlainPadConnected(void) {
+    if (q3e_vrSynthPadConn >= 0)
+        return q3e_vrSynthPadConn ? 1 : 0;
+    return pad_pick() != nil;
+}
+
+// Context 3 (charter D5): outside VR the Sense pair presents as a gamepad, so
+// the controllers are never dead in the 2D window or on the 3D panel. It writes
+// nothing but the same snapshot fields an ordinary pad writes, so everything
+// downstream — the response curve, the deadzone, the sensitivity sliders, the
+// menu navigation, the binds — is inherited rather than re-implemented.
+//
+// The BUTTON MAP IS THE SAME ONE VR USES, deliberately: one layout to learn, and
+// one line on a device checklist instead of two.
+static void sense_flat_merge(q3e_padsnap_t *s) {
+    unsigned btn[2];
+    float st[4];
+    if (Q3E_GetMode() == Q3E_MODE_VR)
+        return;                     // VR owns the pair; its own consumer has it
+    if (!Q3E_Sense_UISample(btn, st))
+        return;                     // nothing answered: never zero a real pad's axes
+    s->have = 1;
+    s->lx += st[0];  s->ly += st[1];        // left hand moves
+    s->rx += st[2];  s->ry += st[3];        // right hand looks
+    if (btn[Q3E_SENSE_RIGHT] & Q3E_SENSE_TRIGGER) s->fire = YES;
+    if (btn[Q3E_SENSE_LEFT]  & Q3E_SENSE_TRIGGER) s->zoom = YES;
+    if (btn[Q3E_SENSE_RIGHT] & Q3E_SENSE_A)       s->jump = YES;
+    if (btn[Q3E_SENSE_RIGHT] & Q3E_SENSE_B)       s->use = YES;
+    if (btn[Q3E_SENSE_LEFT]  & Q3E_SENSE_A)       s->wprev = YES;
+    if (btn[Q3E_SENSE_LEFT]  & Q3E_SENSE_B)       s->wnext = YES;
+    if (btn[Q3E_SENSE_LEFT]  & Q3E_SENSE_GRIP)    s->crouch = YES;
+    if (btn[Q3E_SENSE_RIGHT] & Q3E_SENSE_GRIP)    s->scores = YES;
+    if ((btn[0] | btn[1]) & Q3E_SENSE_MENU)       s->esc = YES;
+    if (btn[Q3E_SENSE_LEFT]  & Q3E_SENSE_STICK)   s->l3 = YES;
+    if (btn[Q3E_SENSE_RIGHT] & Q3E_SENSE_STICK)   s->r3 = YES;
+    // In menus the right trigger clicks, exactly as it does on a pad.
+    if (btn[Q3E_SENSE_RIGHT] & Q3E_SENSE_TRIGGER) s->menuClick = YES;
+}
+#endif
+
 static void pad_poll(int menuMode, float dt) {
-    GCController *pad = GCController.controllers.firstObject;
-    if (!pad || !pad.extendedGamepad) {
-        if (pad_side || pad_forward) {
-            pad_side = pad_forward = 0;
-            Q3E_QueueJoyAxis(0, 0);
-            Q3E_QueueJoyAxis(1, 0);
+    GCController *pad = pad_pick();
+    GCExtendedGamepad *gp = pad ? pad.extendedGamepad : nil;
+
+#if TARGET_OS_VISION
+    // The VR turn seam runs whether or not a controller is attached, and BEFORE
+    // the no-controller early-out below.
+    //
+    // It used to sit further down, past that return, which made the entire turn
+    // mechanism — and the synthetic injection the suite drives it with — depend
+    // on a physical gamepad being paired to the host. On a controllerless
+    // simulator it was simply dead code that no test could reach, and the test
+    // that appeared to cover it was actually measuring the host's peripherals.
+    int vrTurnConsumed = 0;
+    int vrPadAimConsumed = 0;
+    if (!menuMode) {
+        // The Sense pair's own consumer (Q3E_VR_SenseInputFrame) already ran
+        // this frame and, if a hand answered, already fed the turn seam its
+        // right-stick deflection. Calling it a SECOND time with the pad's stick
+        // — which reads 0.0 with no pad attached — would re-arm the snap
+        // hysteresis on every frame, so a stick held past the threshold would
+        // snap-turn continuously instead of once. Exactly one context feeds this
+        // axis, and the pad's own stick is zeroed below when the hands own it.
+        if (q3e_vr_sense_drives) {
+            vrTurnConsumed = 1;
+        } else {
+            float trx = 0.0f, try_ = 0.0f;
+            if (gp) {
+                const float x = gp.rightThumbstick.xAxis.value;
+                const float y = gp.rightThumbstick.yAxis.value;
+                const float m = sqrtf(x * x + y * y);
+                trx = pad_deadzone(x, m);
+                try_ = pad_deadzone(y, m);
+            }
+            // R4.6 — "Aiming: Gamepad". The stick is EITHER the aim or the turn,
+            // never both: two consumers of one axis is how a port turns twice as
+            // fast as its own settings say (the note below, learned the hard
+            // way). The aim seam answers first because it is the mode the player
+            // explicitly chose, and since R4.7 it IS the turn — it pushes the
+            // stick straight into cl_vr_turn_pending — so turning is not lost by
+            // taking this branch, whatever the Turn row says.
+            //
+            // Same curve and the same sensitivity scaling the flat look path
+            // uses below, so a stick that aims in VR feels like the stick that
+            // looks everywhere else.
+            {
+                const float cx = 0.25f * fabsf(trx) + 0.75f * trx * trx;
+                const float cy = 0.25f * fabsf(try_) + 0.75f * try_ * try_;
+                vrPadAimConsumed =
+                    Q3E_VR_ConsumePadAim(copysignf(cx, trx) * (look_sens_x * (1.0f / 3.5f)),
+                                         copysignf(cy, try_) * (look_sens_y * (1.0f / 3.5f)),
+                                         dt);
+            }
+            vrTurnConsumed = vrPadAimConsumed ? 1 : Q3E_VR_ConsumeTurnAxis(trx, dt);
         }
-        return;
     }
-    GCExtendedGamepad *g = pad.extendedGamepad;
+#endif
+
+    // ---- the merged snapshot (see q3e_padsnap_t) ----
+    q3e_padsnap_t s;
+    memset(&s, 0, sizeof(s));
+    if (gp) {
+        GCExtendedGamepad *g = gp;
+        s.have = 1;
+        s.lx = g.leftThumbstick.xAxis.value;
+        s.ly = g.leftThumbstick.yAxis.value;
+        s.rx = g.rightThumbstick.xAxis.value;
+        s.ry = g.rightThumbstick.yAxis.value;
+        s.fire   = g.rightTrigger.pressed;
+        s.zoom   = g.leftTrigger.pressed;
+        s.jump   = g.buttonA.pressed;
+        s.use    = g.buttonX.pressed;
+        s.wprev  = g.leftShoulder.pressed;
+        s.wnext  = g.rightShoulder.pressed;
+        s.esc    = g.buttonMenu.pressed;
+        s.scores = g.buttonOptions.pressed;
+        s.crouch = g.buttonB.pressed;
+        s.aux    = g.buttonY.pressed;
+        s.l3     = g.leftThumbstickButton.pressed;
+        s.r3     = g.rightThumbstickButton.pressed;
+        s.dpadU  = g.dpad.up.pressed;
+        s.dpadD  = g.dpad.down.pressed;
+        s.dpadL  = g.dpad.left.pressed;
+        s.dpadR  = g.dpad.right.pressed;
+        s.menuClick = g.rightTrigger.pressed;
+    }
+#if TARGET_OS_VISION
+    sense_flat_merge(&s);
+#endif
+    // NO early return on "nothing connected". An all-zero snapshot is exactly
+    // what releases whatever a just-disconnected controller left held, and the
+    // loops below are a dozen comparisons against nothing.
 
     // release all held pad keys on a menu<->gameplay switch so nothing sticks
     // and no in-flight press re-fires under the other mode's mapping
@@ -265,8 +469,8 @@ static void pad_poll(int menuMode, float dt) {
     if (!menuMode) {
         // ---- GAMEPLAY ----
         // left stick → movement axes with the shared response curve
-        float lx = g.leftThumbstick.xAxis.value;
-        float ly = g.leftThumbstick.yAxis.value;
+        float lx = s.lx;
+        float ly = s.ly;
         float m = sqrtf(lx * lx + ly * ly);
         if (m > 1.0f) { lx /= m; ly /= m; m = 1.0f; }
         lx = pad_deadzone(lx, m);
@@ -279,11 +483,23 @@ static void pad_poll(int menuMode, float dt) {
         if (forward != pad_forward) { pad_forward = forward; Q3E_QueueJoyAxis(1, forward); }
 
         // right stick → look deltas (mouse), cubic-accelerated
-        float rx = g.rightThumbstick.xAxis.value;
-        float ry = g.rightThumbstick.yAxis.value;
+        float rx = s.rx;
+        float ry = s.ry;
         float rm = sqrtf(rx * rx + ry * ry);
         rx = pad_deadzone(rx, rm);
         ry = pad_deadzone(ry, rm);
+#if TARGET_OS_VISION
+        // Consumed above, before the no-controller early-out. Zero it here so
+        // exactly one context emits for this axis — two consumers of one stick is
+        // how a port turns twice as fast as its own settings say. Y (pitch) is
+        // untouched.
+        if (vrTurnConsumed) rx = 0.0f;
+        // R4.6: when the stick is AIMING, its Y is spoken for as well — the
+        // mouse-look pitch it would otherwise queue is overwritten by the aim
+        // write every frame, but it is still an input the player did not ask
+        // for, and leaving it in would be a second opinion about the same axis.
+        if (vrPadAimConsumed) ry = 0.0f;
+#endif
         // dt-normalized to the 120 Hz reference so the 60 Hz refresh setting
         // doesn't change turn rate. Response is a linear+quadratic blend (was
         // pure |v|·v) so the slow->fast transition is gentler while small-stick
@@ -306,26 +522,41 @@ static void pad_poll(int menuMode, float dt) {
         }
 
         // gameplay buttons
-        pad_button(&pad_fire, g.rightTrigger.pressed, "MOUSE1");
-        pad_button(&pad_zoom, g.leftTrigger.pressed, "MOUSE2");
-        pad_button(&pad_jump, g.buttonA.pressed, "SPACE");
-        pad_button(&pad_use,  g.buttonX.pressed, "ENTER");
-        pad_button(&pad_wprev, g.leftShoulder.pressed, "[");
-        pad_button(&pad_wnext, g.rightShoulder.pressed, "]");
-        pad_button(&pad_esc,  g.buttonMenu.pressed, "ESCAPE"); // START opens the menu
-        pad_button(&pad_scores, g.buttonOptions.pressed, "TAB"); // VIEW = show scores
+        pad_button(&pad_fire, s.fire, "MOUSE1");
+        pad_button(&pad_zoom, s.zoom, "MOUSE2");
+        pad_button(&pad_jump, s.jump, "SPACE");
+        pad_button(&pad_use,  s.use, "ENTER");
+        pad_button(&pad_wprev, s.wprev, "[");
+        pad_button(&pad_wnext, s.wnext, "]");
+        pad_button(&pad_esc,  s.esc, "ESCAPE"); // START opens the menu
+        pad_button(&pad_scores, s.scores, "TAB"); // VIEW = show scores
 
-        // L3 = TOGGLE crouch (latched); B = hold crouch. "c" (+movedown) is
-        // held if either is active, so the two never fight over the key.
-        BOOL l3 = g.leftThumbstickButton.pressed;
+        // L3 = TOGGLE crouch (latched), and it alone holds "c" (+movedown) now.
+        // B used to be OR-ed in here; it is a bindable key (AUX6) since it left
+        // this line, seeded to +movedown by the boot migration so a player who
+        // never opens the console still gets hold-to-crouch on B.
+        BOOL l3 = s.l3;
         if (l3 && !l3_prev) crouch_toggled = !crouch_toggled;
         l3_prev = l3;
-        pad_button(&pad_crouch, (g.buttonB.pressed || crouch_toggled), "c");
+        pad_button(&pad_crouch, crouch_toggled, "c");
 
-        // R3 = center view (recenter pitch) — one-shot on press
-        BOOL r3 = g.rightThumbstickButton.pressed;
-        if (r3 && !r3_prev) Q3E_QueueCommand("centerview");
-        r3_prev = r3;
+        // Y and the d-pad carry NO built-in action: they emit the engine's
+        // AUX1..AUX5 key names so the player can `bind` them to anything (mod
+        // commands — Urban Terror's stance/weapon menus — voice chat, gestures).
+        // Gameplay only: in menus the d-pad is the arrow-key navigation below,
+        // which is also why the in-game bindings screen cannot capture them.
+        pad_button(&pad_aux1, s.aux,   "AUX1");
+        pad_button(&pad_aux2, s.dpadU, "AUX2");
+        pad_button(&pad_aux3, s.dpadD, "AUX3");
+        pad_button(&pad_aux4, s.dpadL, "AUX4");
+        pad_button(&pad_aux5, s.dpadR, "AUX5");
+
+        // B and R3 are bindable too, so a player can reproduce a PC layout
+        // exactly. Their old hardcoded behaviour survives as a DEFAULT BIND
+        // seeded once by the boot migration (AUX6 = +movedown, AUX7 =
+        // centerview) — rebinding either simply overwrites it.
+        pad_button(&pad_aux6, s.crouch, "AUX6");
+        pad_button(&pad_aux7, s.r3,     "AUX7");
     } else {
         // ---- MENU NAVIGATION (only while a menu / console is up) ----
         // no player movement in menus — zero the move axes (the left stick
@@ -339,28 +570,26 @@ static void pad_poll(int menuMode, float dt) {
 
         // dpad + left stick → arrow keys: up/down move between items,
         // left/right adjust sliders and spin-controls (the horizontal menus).
-        int dirY = g.dpad.up.pressed   ? -1 : g.dpad.down.pressed  ?  1 :
-                   (g.leftThumbstick.yAxis.value >  0.5f ? -1 :
-                    g.leftThumbstick.yAxis.value < -0.5f ?  1 : 0);
-        int dirX = g.dpad.left.pressed ? -1 : g.dpad.right.pressed ?  1 :
-                   (g.leftThumbstick.xAxis.value < -0.5f ? -1 :
-                    g.leftThumbstick.xAxis.value >  0.5f ?  1 : 0);
+        int dirY = s.dpadU ? -1 : s.dpadD ?  1 :
+                   (s.ly >  0.5f ? -1 : s.ly < -0.5f ?  1 : 0);
+        int dirX = s.dpadL ? -1 : s.dpadR ?  1 :
+                   (s.lx < -0.5f ? -1 : s.lx >  0.5f ?  1 : 0);
         menu_axis(dirY, &menu_dir_y, &menu_rep_y, dt, "UPARROW", "DOWNARROW");
         menu_axis(dirX, &menu_dir_x, &menu_rep_x, dt, "LEFTARROW", "RIGHTARROW");
 
         // face buttons: A = Enter (activate), B = Esc (back / close), X = Space.
         // START stays unmapped in-menu — it opens the menu from gameplay, and
         // mapping it here would toggle the menu shut on the same press; B closes.
-        pad_button(&menu_btnA, g.buttonA.pressed, "ENTER");
-        pad_button(&menu_btnB, g.buttonB.pressed, "ESCAPE");
-        pad_button(&menu_btnX, g.buttonX.pressed, "SPACE");
+        pad_button(&menu_btnA, s.jump, "ENTER");
+        pad_button(&menu_btnB, s.crouch, "ESCAPE");
+        pad_button(&menu_btnX, s.use, "SPACE");
 
         // right stick → move the UI mouse cursor, RT = click. This reaches
         // mouse-only widgets the arrow keys can't — notably the server
         // browser's FIGHT button (the stock Q3 list joins on FIGHT / a
         // double-click, not on Enter). Complements the arrow-key nav above.
-        float rx = g.rightThumbstick.xAxis.value;
-        float ry = g.rightThumbstick.yAxis.value;
+        float rx = s.rx;
+        float ry = s.ry;
         float rm = sqrtf(rx * rx + ry * ry);
         rx = pad_deadzone(rx, rm);
         ry = pad_deadzone(ry, rm);
@@ -369,9 +598,223 @@ static void pad_poll(int menuMode, float dt) {
         menu_cury += -ry * fabsf(ry) * MENU_CURSOR_SPEED * cur_dt;
         int cdx = (int)menu_curx, cdy = (int)menu_cury;
         if (cdx || cdy) { menu_curx -= cdx; menu_cury -= cdy; Q3E_QueueMouse(cdx, cdy); }
-        pad_button(&menu_click, g.rightTrigger.pressed, "MOUSE1");
+        pad_button(&menu_click, s.menuClick, "MOUSE1");
     }
 }
+
+#if TARGET_OS_VISION
+// ---------------------------------------------------------------------------
+// The Sense pair in VR — contexts 1 and 2 of charter D5.
+//
+// It lives HERE, next to the pad layer, and not in the engine-side glue, because
+// everything it needs already exists here and having a second copy of any of it
+// is how two input paths drift: the response curve, the radial deadzone, the
+// edge detector (pad_button) and the menu auto-repeat (menu_axis) are the SAME
+// ones an ordinary gamepad goes through. What it does NOT share is the held
+// state: contexts 1/2 and context 3 are mutually exclusive on the mode, and one
+// context's release must never cancel the other's hold.
+//
+// THE PARTITION, stated so it can be checked: this function returns immediately
+// unless the mode is VR; the flat merge (sense_flat_merge) returns immediately
+// unless it is not. Exactly one of them emits for a given input at a given
+// moment, and the button LAYOUT is identical either way.
+//
+// The BINDS are the shipped key names, not a private table: MOUSE1/SPACE/ENTER/
+// [ / ] / c / TAB / ESCAPE go through Q3E_QueueNamedKey exactly as the pad's do,
+// so every one of them follows whatever the player has bound in Quake's own
+// bind system. There is no new bind machinery to learn or to break.
+int q3e_vr_sense_drives = 0;
+
+static int vr_fire, vr_zoom, vr_jump, vr_use, vr_wprev, vr_wnext;
+static int vr_crouch, vr_scores, vr_esc;
+static int vr_crouch_toggled;
+static int vr_side, vr_forward;
+static int vr_menu_dir_x, vr_menu_dir_y;
+static float vr_menu_rep_x, vr_menu_rep_y;
+static int vr_ctx = -1;            // -1 = not ours, 0 = gameplay, 1 = menu/console
+// One-shots emitted by the MENU context, counted so the partition rule is a
+// number rather than an inspection: exactly one context may emit for a given
+// input at a given moment, and a gameplay trigger that also opened a menu item
+// would show up here as a count that moved when it should not have.
+static int vr_ui_enter, vr_ui_esc;
+// Fault injection (`q3evrhandctx 0`): make the context boundary do NOTHING —
+// no release of what is held, no rebase of the edge detector. That is the
+// donor's own bug #25 reproduced deliberately, and it is what proves the
+// assertion "a button held across a context switch does not stick" is testing
+// something rather than describing code nobody has watched fail.
+int q3e_vr_sense_ctx_handoff = 1;
+
+// What this consumer is holding right now, for HANDNOW. Publishing the held
+// state is what turns "no key sticks across a context switch" from something
+// read in the code into something a suite can watch fail.
+void Q3E_VR_SenseHeldString(char *buf, int n) {
+    snprintf(buf, (size_t)n,
+             "ctx=%s held=(fire%d,zoom%d,jump%d,use%d,wprev%d,wnext%d,crouch%d,scores%d,esc%d) "
+             "crouchtoggle=%d move=(%d,%d) uienter=%d uiesc=%d drives=%d handoff=%d",
+             (vr_ctx < 0) ? "none" : (vr_ctx ? "menu" : "play"),
+             vr_fire, vr_zoom, vr_jump, vr_use, vr_wprev, vr_wnext,
+             vr_crouch, vr_scores, vr_esc, vr_crouch_toggled,
+             vr_side, vr_forward, vr_ui_enter, vr_ui_esc, q3e_vr_sense_drives,
+             q3e_vr_sense_ctx_handoff);
+}
+
+void Q3E_VR_SenseReleaseHeld(void) {
+    pad_button(&vr_fire,   NO, "MOUSE1");
+    pad_button(&vr_zoom,   NO, "MOUSE2");
+    pad_button(&vr_jump,   NO, "SPACE");
+    pad_button(&vr_use,    NO, "ENTER");
+    pad_button(&vr_wprev,  NO, "[");
+    pad_button(&vr_wnext,  NO, "]");
+    pad_button(&vr_crouch, NO, "c");
+    pad_button(&vr_scores, NO, "TAB");
+    pad_button(&vr_esc,    NO, "ESCAPE");
+    if (vr_side || vr_forward) {
+        vr_side = vr_forward = 0;
+        Q3E_QueueJoyAxis(0, 0);
+        Q3E_QueueJoyAxis(1, 0);
+    }
+    vr_crouch_toggled = 0;
+    vr_menu_dir_x = vr_menu_dir_y = 0;
+    vr_menu_rep_x = vr_menu_rep_y = 0.0f;
+}
+
+void Q3E_VR_SenseInputFrame(float dt) {
+    unsigned down[2], up[2], level[2];
+    float stick[4];
+    int hands, ctx, aim, off;
+
+    q3e_vr_sense_drives = 0;
+
+    if (Q3E_GetMode() != Q3E_MODE_VR) {
+        // Context 3 has the pair now. Drop everything this consumer was holding
+        // so no key crosses the boundary latched, and forget the pending edges
+        // so the far side does not read a held button as a fresh press.
+        if (vr_ctx != -1) {
+            if (q3e_vr_sense_ctx_handoff) {
+                Q3E_VR_SenseReleaseHeld();
+                Q3E_Sense_RebaseEdges();
+            }
+            vr_ctx = -1;
+        }
+        return;
+    }
+
+    ctx = Q3E_MenuMode() ? 1 : 0;
+    if (ctx != vr_ctx) {
+        // Same discipline at the gameplay <-> menu boundary. RebaseEdges keeps
+        // whatever is physically held as the new baseline, so a trigger held
+        // through the transition neither fires ENTER on the menu side nor emits
+        // a release nobody made.
+        if (q3e_vr_sense_ctx_handoff) {
+            Q3E_VR_SenseReleaseHeld();
+            Q3E_Sense_RebaseEdges();
+        }
+        vr_ctx = ctx;
+    }
+
+    hands = Q3E_Sense_TakeEdges(down, up, level, stick);
+    if (hands <= 0) {
+        // Release-on-doff: both controllers gone (or the headset off, which
+        // stops the poll that feeds them). Everything held goes with them —
+        // never leave a doffed player firing.
+        Q3E_VR_SenseReleaseHeld();
+        return;
+    }
+    q3e_vr_sense_drives = 1;
+
+    aim = (q3e_vrAimHand == Q3E_VR_HAND_LEFT) ? Q3E_SENSE_LEFT : Q3E_SENSE_RIGHT;
+    off = aim ^ 1;
+
+    if (ctx == 0) {
+        // ---- VR GAMEPLAY ----
+        // The OFF hand moves and the AIM hand turns, so a left-handed player who
+        // switches the Aim Hand row gets a layout that mirrors rather than one
+        // that fights them.
+        float lx = stick[off * 2 + 0], ly = stick[off * 2 + 1], m, scale;
+        int side, forward;
+        m = sqrtf(lx * lx + ly * ly);
+        if (m > 1.0f) { lx /= m; ly /= m; m = 1.0f; }
+        lx = pad_deadzone(lx, m);
+        ly = pad_deadzone(ly, m);
+        m = sqrtf(lx * lx + ly * ly);
+        scale = (m > 0.001f) ? (apply_curve(m) / m) : 0.0f;
+        side = (int)lroundf(127.0f * lx * scale);
+        forward = (int)lroundf(127.0f * ly * scale);
+        if (side != vr_side)       { vr_side = side;       Q3E_QueueJoyAxis(0, side); }
+        if (forward != vr_forward) { vr_forward = forward; Q3E_QueueJoyAxis(1, forward); }
+
+        // The aim hand's X is the TURN, through the one seam that owns snap and
+        // smooth (Q3E_VR_ConsumeTurnAxis). Y is deliberately unused: pitch comes
+        // from where the hand is pointing, and a stick that also pitched would be
+        // two aim sources for one axis.
+        {
+            const float tx = stick[aim * 2 + 0];
+            Q3E_VR_ConsumeTurnAxis(pad_deadzone(tx, fabsf(tx)), dt);
+        }
+
+        pad_button(&vr_fire,  (level[aim] & Q3E_SENSE_TRIGGER) != 0, "MOUSE1");
+        pad_button(&vr_zoom,  (level[off] & Q3E_SENSE_TRIGGER) != 0, "MOUSE2");
+        pad_button(&vr_jump,  (level[aim] & Q3E_SENSE_A) != 0, "SPACE");
+        pad_button(&vr_use,   (level[aim] & Q3E_SENSE_B) != 0, "ENTER");
+        pad_button(&vr_wprev, (level[off] & Q3E_SENSE_A) != 0, "[");
+        pad_button(&vr_wnext, (level[off] & Q3E_SENSE_B) != 0, "]");
+        pad_button(&vr_scores,(level[aim] & Q3E_SENSE_GRIP) != 0, "TAB");
+        pad_button(&vr_esc,   ((level[0] | level[1]) & Q3E_SENSE_MENU) != 0, "ESCAPE");
+
+        // Off-hand stick click TOGGLES crouch; the off grip HOLDS it. "c"
+        // (+movedown) is down if either is active, so the two never fight.
+        if (down[off] & Q3E_SENSE_STICK)
+            vr_crouch_toggled = !vr_crouch_toggled;
+        pad_button(&vr_crouch, ((level[off] & Q3E_SENSE_GRIP) || vr_crouch_toggled) != 0, "c");
+
+        // Aim-hand stick click recentres the VR view — the one action that has no
+        // flat equivalent, on the one button flat mode gives to something
+        // standard instead.
+        if (down[aim] & Q3E_SENSE_STICK)
+            Q3E_VR_Recenter();
+
+        // Haptics: a transient tap the instant the shot leaves, on the hand that
+        // fired. The trigger EDGE, not the level — a held trigger buzzing at
+        // frame rate is what the throttle in the log exists to catch.
+        if (down[aim] & Q3E_SENSE_TRIGGER)
+            Q3E_VR_Haptic(aim, 0.7f, 0.035f, "fire");
+    } else {
+        // ---- VR MENUS / CONSOLE (context 2) ----
+        // Q3 has no blocking modal pumps, so a per-frame pump is sufficient.
+        // Movement stops dead here: the sticks navigate.
+        int dirX, dirY;
+        float lx, ly;
+        if (vr_side || vr_forward) {
+            vr_side = vr_forward = 0;
+            Q3E_QueueJoyAxis(0, 0);
+            Q3E_QueueJoyAxis(1, 0);
+        }
+        // Either hand navigates: summed, then thresholded, so a player holding
+        // one controller can still drive the whole menu.
+        lx = stick[0] + stick[2];
+        ly = stick[1] + stick[3];
+        dirY = (ly >  0.5f) ? -1 : (ly < -0.5f) ?  1 : 0;
+        dirX = (lx < -0.5f) ? -1 : (lx >  0.5f) ?  1 : 0;
+        menu_axis(dirY, &vr_menu_dir_y, &vr_menu_rep_y, dt, "UPARROW", "DOWNARROW");
+        menu_axis(dirX, &vr_menu_dir_x, &vr_menu_rep_x, dt, "LEFTARROW", "RIGHTARROW");
+
+        // Buttons are ONE-SHOT here, off the edge rather than the level: a menu
+        // press is an event, and holding A must not re-activate an item sixty
+        // times a second. Hand-agnostic — a menu does not care which hand.
+        if ((down[0] | down[1]) & (Q3E_SENSE_TRIGGER | Q3E_SENSE_A)) {
+            Q3E_QueueNamedKey("ENTER", 1);
+            Q3E_QueueNamedKey("ENTER", 0);
+            vr_ui_enter++;
+        }
+        if ((down[0] | down[1]) & (Q3E_SENSE_B | Q3E_SENSE_MENU)) {
+            Q3E_QueueNamedKey("ESCAPE", 1);
+            Q3E_QueueNamedKey("ESCAPE", 0);
+            vr_ui_esc++;
+        }
+    }
+    (void)up;
+}
+#endif // TARGET_OS_VISION
 
 void Q3E_Input_Frame(void) {
     // real per-callback dt (seconds) for frame-rate-independent look accel
@@ -383,6 +826,11 @@ void Q3E_Input_Frame(void) {
 
     const int menuMode = Q3E_MenuMode();
     tapstep_drain_one();
+#if TARGET_OS_VISION
+    // BEFORE the pad layer, always: it is the consumer that owns the turn seam
+    // while the hands are driving, and pad_poll asks whether that happened.
+    Q3E_VR_SenseInputFrame(dt);
+#endif
     pad_poll(menuMode, dt);
     gyro_poll(menuMode, dt);
 }
@@ -472,6 +920,111 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
 
 // ---- the view ----
 
+// ---- hardware keyboard ------------------------------------------------------
+// visionOS delivers a paired keyboard (including the Mac Virtual Display's) as
+// UIPress events with a UIKey — but ONLY to the responder chain, and only when
+// something in it is first responder. The engine wants two independent streams
+// out of that, exactly as SDL feeds it on desktop: SE_KEY down/up for binds and
+// menu navigation, SE_CHAR for text. -insertText: supplies the characters (it is
+// what both a hardware keystroke and a virtual-keyboard tap arrive as), the
+// press handler below supplies the key events; a printable key legitimately
+// produces one of each, and the engine's text fields consume only the char.
+
+typedef struct {
+    UIKeyboardHIDUsage code;
+    const char *name;           // engine keyname (Key_StringToKeynum)
+} q3e_keymap_t;
+
+// Only the keys whose engine name is NOT simply the character they type.
+static const q3e_keymap_t q3e_keymap[] = {
+    { UIKeyboardHIDUsageKeyboardReturnOrEnter, "ENTER" },
+    { UIKeyboardHIDUsageKeypadEnter,           "ENTER" },
+    { UIKeyboardHIDUsageKeyboardEscape,        "ESCAPE" },
+    { UIKeyboardHIDUsageKeyboardDeleteOrBackspace, "BACKSPACE" },
+    { UIKeyboardHIDUsageKeyboardDeleteForward, "DEL" },
+    { UIKeyboardHIDUsageKeyboardTab,           "TAB" },
+    { UIKeyboardHIDUsageKeyboardSpacebar,      "SPACE" },
+    { UIKeyboardHIDUsageKeyboardUpArrow,       "UPARROW" },
+    { UIKeyboardHIDUsageKeyboardDownArrow,     "DOWNARROW" },
+    { UIKeyboardHIDUsageKeyboardLeftArrow,     "LEFTARROW" },
+    { UIKeyboardHIDUsageKeyboardRightArrow,    "RIGHTARROW" },
+    { UIKeyboardHIDUsageKeyboardInsert,        "INS" },
+    { UIKeyboardHIDUsageKeyboardHome,          "HOME" },
+    { UIKeyboardHIDUsageKeyboardEnd,           "END" },
+    { UIKeyboardHIDUsageKeyboardPageUp,        "PGUP" },
+    { UIKeyboardHIDUsageKeyboardPageDown,      "PGDN" },
+    { UIKeyboardHIDUsageKeyboardCapsLock,      "CAPSLOCK" },
+    { UIKeyboardHIDUsageKeyboardLeftShift,     "SHIFT" },
+    { UIKeyboardHIDUsageKeyboardRightShift,    "SHIFT" },
+    { UIKeyboardHIDUsageKeyboardLeftControl,   "CTRL" },
+    { UIKeyboardHIDUsageKeyboardRightControl,  "CTRL" },
+    { UIKeyboardHIDUsageKeyboardLeftAlt,       "ALT" },
+    { UIKeyboardHIDUsageKeyboardRightAlt,      "ALT" },
+    { UIKeyboardHIDUsageKeyboardLeftGUI,       "COMMAND" },
+    { UIKeyboardHIDUsageKeyboardRightGUI,      "COMMAND" },
+    { UIKeyboardHIDUsageKeyboardSemicolon,     "SEMICOLON" },
+    // ` opens the console on desktop and has no bindable name of its own.
+    { UIKeyboardHIDUsageKeyboardGraveAccentAndTilde, "CONSOLE" },
+    { UIKeyboardHIDUsageKeyboardF1,  "F1" },  { UIKeyboardHIDUsageKeyboardF2,  "F2" },
+    { UIKeyboardHIDUsageKeyboardF3,  "F3" },  { UIKeyboardHIDUsageKeyboardF4,  "F4" },
+    { UIKeyboardHIDUsageKeyboardF5,  "F5" },  { UIKeyboardHIDUsageKeyboardF6,  "F6" },
+    { UIKeyboardHIDUsageKeyboardF7,  "F7" },  { UIKeyboardHIDUsageKeyboardF8,  "F8" },
+    { UIKeyboardHIDUsageKeyboardF9,  "F9" },  { UIKeyboardHIDUsageKeyboardF10, "F10" },
+    { UIKeyboardHIDUsageKeyboardF11, "F11" }, { UIKeyboardHIDUsageKeyboardF12, "F12" },
+};
+
+// 0 = auto (follow the engine), 1 = forced on, 2 = forced off (fault injection:
+// with the responder held down the virtual keyboard can never appear and typed
+// characters can never reach a field, which is what makes the green case mean
+// something).
+static int  kbd_mode = 0;
+static BOOL kbd_textMode = NO;        // the system keyboard is the input view
+static BOOL kbd_responder = NO;       // the view holds first responder
+static int  kbd_keyEvents = 0;        // SE_KEY pairs queued from the key path
+static int  kbd_charEvents = 0;       // SE_CHAR events queued from the text path
+static char kbd_last[64] = "none";    // last routed key/char, human readable
+static int  kbd_seq = 0;              // monotone: a dump is fresh or it is stale
+// Dismiss has to STICK. The auto-summon is a 4 Hz poll of an engine-side hint
+// that stays true for as long as the field keeps painting its cursor — so
+// without this, tapping "Dismiss ⌨" bought a quarter of a second before the
+// same focus raised the keyboard again. The flag says "this focus already had
+// its keyboard and the user closed it".
+//
+// What re-arms it is a TOUCH in the game view, not a change of engine state:
+// both the focus hint and the key catcher stay constant across a whole menu
+// screen, so "the focus went away" is invisible to the poll — with only that
+// test, dismissing on one field left every other field on the same menu unable
+// to raise the keyboard until the user backed out of the menu entirely. A tap
+// is the honest signal: land it on nothing and the field defocuses, the hint
+// goes stale within a frame and the poll leaves the keyboard down; land it on a
+// field (the same one or another) and the hint refreshes and the keyboard comes
+// back. That is exactly the "click off and back on" the UX asks for.
+static BOOL kbd_dismissed = NO;
+static int  kbd_lastCatcher = 0;
+
+int  Q3E_TextInputWanted(void);       // ios_glue.c
+int  Q3E_KeyCatcher(void);            // ios_glue.c
+
+static const char *q3e_keyname_for(UIKeyboardHIDUsage code, NSString *chars,
+                                   char *buf, size_t buflen) {
+    for (size_t i = 0; i < sizeof(q3e_keymap) / sizeof(q3e_keymap[0]); i++) {
+        if (q3e_keymap[i].code == code) return q3e_keymap[i].name;
+    }
+    if (chars.length >= 1) {
+        unichar c = [chars characterAtIndex:0];
+        if (c >= 32 && c < 127) {
+            // The engine's keynames are the UNSHIFTED characters; a keyboard that
+            // reports the shifted glyph would otherwise miss its own binds.
+            if (c >= 'A' && c <= 'Z') c = (unichar)(c - 'A' + 'a');
+            if (c == ' ') return "SPACE";
+            if (c == ';') return "SEMICOLON";
+            buf[0] = (char)c; buf[1] = '\0';
+            return buf;
+        }
+    }
+    return NULL;
+}
+
 @interface Q3EInputView () <UIKeyInput>
 @end
 
@@ -498,17 +1051,129 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
     BOOL _menuMode;
     BOOL _padConnected;
     UIToolbar *_kbToolbar;
+    UIView *_kbSuppressView;   // zero-size stand-in input view: first responder, no keyboard
 }
 
 + (Class)layerClass { return [CAMetalLayer class]; }
 
-// ---- on-screen keyboard (UIKeyInput) ----
-// 3-finger tap toggles it (q2repro-proven fallback until per-field focus
-// detection exists); the view slides up by the keyboard height so the
-// typed line stays visible; the accessory bar's Dismiss button is the
-// reliable close path. Keys feed the engine as SE_CHAR/SE_KEY events.
+// ---- keyboard (UIKeyInput) ----
+// The view is first responder WHENEVER it can be, because that is the only way
+// hardware key events reach the app at all — but first responder normally means
+// a keyboard on screen, which is wrong for 99% of a game. So the input view is
+// a zero-size stand-in until the engine actually wants text, at which point it
+// becomes nil (= the system keyboard) and -reloadInputViews raises it. That is
+// what turns "the menu cursor moved onto the player-name field" into a keyboard
+// on visionOS, with no tap-a-button ritual.
+// The view slides up by the keyboard height so the typed line stays visible;
+// the accessory bar's Dismiss button is the reliable close path. Keys feed the
+// engine as SE_CHAR/SE_KEY events.
 
 - (BOOL)canBecomeFirstResponder { return YES; }
+
+- (UIView *)inputView {
+    if (kbd_textMode) return nil;      // the system keyboard
+    if (!_kbSuppressView) {
+        _kbSuppressView = [[UIView alloc] initWithFrame:CGRectZero];
+        _kbSuppressView.backgroundColor = UIColor.clearColor;
+    }
+    return _kbSuppressView;            // first responder, nothing on screen
+}
+
+// Follow the engine's text-entry state. Called from the 4 Hz mode timer — a
+// person moving a menu cursor cannot outrun 250 ms, and polling keeps the whole
+// mechanism on one thread with no engine callback into UIKit.
+- (void)syncKeyboard {
+    BOOL want;
+    if (kbd_mode == 1)      want = YES;
+    else if (kbd_mode == 2) want = NO;
+    else                    want = Q3E_TextInputWanted() != 0;
+
+#if !TARGET_OS_VISION
+    // Dismiss sticks for the life of ONE focus. visionOS is deliberately not in
+    // here: there the keyboard is a floating panel that covers nothing, there is
+    // no Dismiss button on the accessory bar at all (see -inputAccessoryView),
+    // and the flag can therefore never be set — the follow-the-focus behaviour
+    // stays exactly as it was.
+    {
+        const int catcher = Q3E_KeyCatcher();
+        // Secondary re-arm, for the cases a touch is not involved at all: the
+        // hint went stale on its own (a bind closed the field, a map loaded) or
+        // the engine handed keys to something else — console, chat, the game.
+        // The primary re-arm is -touchesBegan: above; neither of these two tests
+        // fires while the user is simply moving between fields of one menu.
+        if (kbd_dismissed && (!want || catcher != kbd_lastCatcher)) {
+            kbd_dismissed = NO;
+            kbd_seq++;
+            Com_Printf("KBDMODE rearm (want=%d catcher=0x%x)\n", (int)want, catcher);
+        }
+        kbd_lastCatcher = catcher;
+        // "q3ekbd on" is an explicit request for the keyboard and outranks it.
+        if (kbd_dismissed && kbd_mode != 1) want = NO;
+    }
+#endif
+
+    if (kbd_mode == 2) {
+        // Forced off: give up first responder entirely, so no key and no
+        // character can reach the engine through this view.
+        if (self.isFirstResponder) [self resignFirstResponder];
+        kbd_responder = NO;
+        kbd_textMode = NO;
+        return;
+    }
+    // Never take first responder back from something in front of us: the iOS
+    // settings sheet, the onboarding flow and the Files picker all present over
+    // this view and some of them own text fields. Claiming it every 250 ms would
+    // dismiss their keyboard mid-word.
+    UIViewController *root = self.window.rootViewController;
+    const BOOL blocked = (root.presentedViewController != nil);
+    if (!self.isFirstResponder && self.window && !blocked) {
+        [self becomeFirstResponder];
+    }
+    kbd_responder = self.isFirstResponder;
+    if (want != kbd_textMode) {
+        kbd_textMode = want;
+        kbd_seq++;
+        [self reloadInputViews];
+        Com_Printf("KBDMODE textMode=%d (responder=%d)\n", (int)kbd_textMode, (int)kbd_responder);
+    }
+}
+
+// ---- hardware keys ----
+
+- (BOOL)routePresses:(NSSet<UIPress *> *)presses down:(BOOL)down {
+    BOOL handled = NO;
+    for (UIPress *p in presses) {
+        UIKey *k = p.key;
+        if (!k) continue;
+        char one[2];
+        const char *name = q3e_keyname_for(k.keyCode, k.charactersIgnoringModifiers, one, sizeof(one));
+        if (!name) continue;
+        Q3E_QueueNamedKey(name, down ? 1 : 0);
+        kbd_keyEvents++;
+        kbd_seq++;
+        snprintf(kbd_last, sizeof(kbd_last), "key:%s:%s", name, down ? "down" : "up");
+        // BACKSPACE is a CHARACTER to this engine, not a key: Field_KeyDownEvent
+        // has no K_BACKSPACE case at all, and Field_CharEvent does the deleting
+        // when it sees ctrl-h (8) — which is what SDL delivers on desktop. The
+        // key event still goes out for binds and for menu code that reads it.
+        if (down && !strcmp(name, "BACKSPACE")) {
+            Q3E_QueueChar(8);
+            kbd_charEvents++;
+        }
+        handled = YES;
+    }
+    return handled;
+}
+
+- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    if (![self routePresses:presses down:YES]) [super pressesBegan:presses withEvent:event];
+}
+- (void)pressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    if (![self routePresses:presses down:NO]) [super pressesEnded:presses withEvent:event];
+}
+- (void)pressesCancelled:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    if (![self routePresses:presses down:NO]) [super pressesCancelled:presses withEvent:event];
+}
 - (BOOL)hasText { return YES; }
 - (UIKeyboardType)keyboardType { return UIKeyboardTypeASCIICapable; }
 - (UITextAutocorrectionType)autocorrectionType { return UITextAutocorrectionTypeNo; }
@@ -518,6 +1183,17 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
 - (UIKeyboardAppearance)keyboardAppearance { return UIKeyboardAppearanceDark; }
 
 - (UIView *)inputAccessoryView {
+    // Only alongside a real keyboard. The view is first responder almost all the
+    // time now, and an accessory bar is drawn for a first responder whatever its
+    // input view is — which would park a toolbar across the bottom of the game.
+    if (!kbd_textMode) return nil;
+#if TARGET_OS_VISION
+    // No Dismiss button here. On visionOS the keyboard is a floating panel that
+    // covers nothing, and dismissing it does not stick: the 4 Hz poll sees the
+    // same field still focused and raises it again a quarter-second later. The
+    // keyboard leaves when the focus does, which is the whole design.
+    return nil;
+#else
     if (!_kbToolbar) {
         _kbToolbar = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, 320, 40)];
         _kbToolbar.barStyle = UIBarStyleBlack;
@@ -526,43 +1202,149 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
         UIBarButtonItem *dismiss = [[UIBarButtonItem alloc]
             initWithTitle:@"Dismiss ⌨" style:UIBarButtonItemStyleDone
             target:self action:@selector(dismissKeyboard)];
-        _kbToolbar.items = @[flex, dismiss];
+        // Paste. There is no text field to long-press on — the engine draws its
+        // own fields — so the only way to get a clipboard string (a Urban Terror
+        // auth key, a server address) into the game is a button of our own.
+        UIBarButtonItem *paste = [[UIBarButtonItem alloc]
+            initWithTitle:@"Paste" style:UIBarButtonItemStylePlain
+            target:self action:@selector(pasteFromClipboard)];
+        _kbToolbar.items = @[flex, paste, dismiss];
         [_kbToolbar sizeToFit];
     }
     return _kbToolbar;
+#endif
 }
 
-- (void)dismissKeyboard { [self resignFirstResponder]; }
+- (void)dismissKeyboard {
+    // Do NOT resign first responder: this view is first responder essentially
+    // all the time so that hardware keys reach the engine, and giving that up
+    // would only be undone by the next poll anyway. Lowering the keyboard is
+    // swapping the input view back to the zero-size stand-in — and the flag is
+    // what stops the poll from swapping it straight back.
+    kbd_dismissed = YES;
+    if (kbd_textMode) {
+        kbd_textMode = NO;
+        [self reloadInputViews];
+    }
+    kbd_seq++;
+    Com_Printf("KBDMODE dismissed (sticks until focus changes)\n");
+}
+
+// Everything the Paste button does once it HAS a string. Split out because the
+// clipboard read is the one part of the job that cannot be driven headlessly.
+- (void)insertPastedString:(NSString *)s {
+    if (!s.length) { Com_Printf("KBDPASTE nothing to paste\n"); return; }
+    // Newlines would submit the field mid-paste (insertText: turns them into
+    // ENTER), so a clipboard string that ends in one — the common case when it
+    // was copied out of a text file or a web page — must lose them here rather
+    // than close the menu the user is typing into.
+    s = [[s stringByReplacingOccurrencesOfString:@"\r" withString:@""]
+             stringByReplacingOccurrencesOfString:@"\n" withString:@""];
+    // The engine's fields are short; a runaway clipboard is not worth pumping
+    // through the 512-event input funnel (512 slots) one character at a time.
+    if (s.length > 256) s = [s substringToIndex:256];
+    if (!s.length) { Com_Printf("KBDPASTE nothing to paste\n"); return; }
+    [self insertText:s];   // the printable-ASCII filter lives there
+    Com_Printf("KBDPASTE %lu char(s)\n", (unsigned long)s.length);
+}
+
+- (void)pasteFromClipboard {
+    // -hasStrings answers without asking the user for anything; -string is the
+    // call that raises iOS's "Allow Paste?" alert, and it BLOCKS its thread
+    // until the alert is answered. On the main thread that would freeze the
+    // display link — and the game with it — for as long as the alert is up, so
+    // the read happens off-main and only the insertion comes back.
+    if (!UIPasteboard.generalPasteboard.hasStrings) {
+        Com_Printf("KBDPASTE clipboard has no text\n");
+        return;
+    }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *s = UIPasteboard.generalPasteboard.string;
+        dispatch_async(dispatch_get_main_queue(), ^{ [self insertPastedString:s]; });
+    });
+}
 
 - (void)insertText:(NSString *)text {
     for (NSUInteger i = 0; i < text.length; i++) {
         unichar c = [text characterAtIndex:i];
-        if (c == '\n') {
+        if (c == '\n' || c == '\r') {
             Q3E_QueueNamedKey("ENTER", 1);
             Q3E_QueueNamedKey("ENTER", 0);
-        } else if (c < 128) {
+            kbd_keyEvents++;
+            snprintf(kbd_last, sizeof(kbd_last), "key:ENTER:tap");
+        } else if (c >= 32 && c < 128) {
             Q3E_QueueChar((int)c);
+            kbd_charEvents++;
+            snprintf(kbd_last, sizeof(kbd_last), "char:%c", (char)c);
         }
+        kbd_seq++;
     }
 }
 
 - (void)deleteBackward {
     Q3E_QueueNamedKey("BACKSPACE", 1);
+    Q3E_QueueChar(8);   // the char is what actually deletes — see routePresses
     Q3E_QueueNamedKey("BACKSPACE", 0);
+    kbd_keyEvents++;
+    kbd_charEvents++;
+    kbd_seq++;
+    snprintf(kbd_last, sizeof(kbd_last), "key:BACKSPACE:tap");
 }
 
 - (void)keyboardWillShow:(NSNotification *)n {
-    CGRect kb = [n.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
-    CGFloat h = [self.window convertRect:kb fromWindow:nil].size.height;
+#if TARGET_OS_VISION
+    // The visionOS keyboard is its own floating panel in front of the window, not
+    // a slab glued to the bottom of it — and in VR this view hosts a parked
+    // window behind a curtain, where sliding it anywhere is at best pointless.
+    (void)n;
+#else
+    // Scale to fit, do not slide. Sliding the view up by the keyboard height
+    // pushed the top of the game off-screen — and the top is exactly where the
+    // fields being typed into live (q3_ui Player Settings "Name", the Urban
+    // Terror auth key). Shrinking the whole view into the strip above the
+    // keyboard keeps every pixel of the game visible while the keyboard is up.
+    UIWindow *win = self.window;
+    if (!win) return;
+    CGRect kb = [win convertRect:[n.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue]
+                      fromWindow:nil];
+    CGFloat winW = win.bounds.size.width, winH = win.bounds.size.height;
+    CGFloat viewW = self.bounds.size.width, viewH = self.bounds.size.height;
+    if (viewH <= 0 || viewW <= 0 || winH <= 0) return;
+
+    CGFloat visibleH = winH - kb.size.height;
+    CGFloat s = visibleH / viewH;
+    if (s > 1) s = 1;         // keyboard taller than the window is nonsense
+    if (s < 0.2) s = 0.2;     // never scale the game into a postage stamp
+
+    // center is in superview coords and is untouched by self.transform, so this
+    // stays correct however many times the notification fires.
+    CGPoint c = [self.superview convertPoint:self.center toView:nil];
+    // After a scale about the anchor point the centre does not move, so place
+    // the shrunken view by translating in window coords: top edge to the window
+    // top, centred horizontally.
+    CGFloat tx = winW * 0.5 - c.x;
+    CGFloat ty = (s * viewH * 0.5) - c.y;
+    CGAffineTransform t = CGAffineTransformConcat(CGAffineTransformMakeScale(s, s),
+                                                  CGAffineTransformMakeTranslation(tx, ty));
+    // UIKit geometry is invisible to an engine screenshot, so the view reports
+    // its own placement to the console — that is how this gets verified from a
+    // Mac (charter §6).
+    Com_Printf("KBDFIT win %.0fx%.0f kbh %.0f visible %.0f view %.0fx%.0f "
+               "scale %.4f t(%.1f,%.1f) top=%.1f bottom=%.1f\n",
+               winW, winH, kb.size.height, visibleH, viewW, viewH, s, tx, ty,
+               c.y + ty - s * viewH * 0.5, c.y + ty + s * viewH * 0.5);
     [UIView animateWithDuration:0.25 animations:^{
-        self.transform = CGAffineTransformMakeTranslation(0, -h);
+        self.transform = t;
     }];
+#endif
 }
 
 - (void)keyboardWillHide:(NSNotification *)n {
+#if !TARGET_OS_VISION
     [UIView animateWithDuration:0.25 animations:^{
         self.transform = CGAffineTransformIdentity;
     }];
+#endif
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -636,6 +1418,7 @@ void Q3E_Input_SetGyro(int enabled, float scale) {
         }
         _modeTimer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) {
             [self syncMode];
+            [self syncKeyboard];
         }];
     }
     return self;
@@ -913,7 +1696,23 @@ static CGFloat q3e_menu_hit_radius(void) {
     return dx * dx + dy * dy <= r * r;
 }
 
+// A new touch in the game view re-arms the auto-summon after a Dismiss. See the
+// kbd_dismissed comment: this is the only signal that distinguishes "still
+// looking at the field I closed the keyboard on" from "poking at the menu
+// again", because the engine's focus hint and key catcher do not change within
+// one menu screen. Cheap and unconditional — the flag is almost always already
+// clear.
+static void q3e_kbd_note_touch(void) {
+#if !TARGET_OS_VISION
+    if (!kbd_dismissed) return;
+    kbd_dismissed = NO;
+    kbd_seq++;
+    Com_Printf("KBDMODE rearm (touch)\n");
+#endif
+}
+
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    q3e_kbd_note_touch();
     if (_editing) {
         CGPoint p = [touches.anyObject locationInView:self];
         _dragCtl = [self placeableAt:p];
@@ -924,12 +1723,12 @@ static CGFloat q3e_menu_hit_radius(void) {
         return;
     }
     if (event.allTouches.count >= 3) {
-        // 3-finger tap: toggle the on-screen keyboard
-        if (self.isFirstResponder) {
-            [self resignFirstResponder];
-        } else {
-            [self becomeFirstResponder];
-        }
+        // 3-finger tap: force the on-screen keyboard up (and back to following
+        // the engine on the next tap). The automatic path covers the console,
+        // chat and any focused menu field; this stays as the manual override for
+        // a mod UI whose fields the engine cannot see.
+        kbd_mode = (kbd_mode == 1) ? 0 : 1;
+        [self syncKeyboard];
         return;
     }
     for (UITouch *t in touches) {
@@ -1181,6 +1980,10 @@ static CGFloat q3e_menu_hit_radius(void) {
     CGSize sz = self.bounds.size;
     CGPoint p = CGPointMake(nrm.x * sz.width, nrm.y * sz.height);
     if (phase == 0) {
+        // Deliberately shared with the real -touchesBegan:: this seam is how the
+        // keyboard's touch re-arm is proven on a device driven over a socket,
+        // where nothing can put a finger on the glass.
+        q3e_kbd_note_touch();
         _dragCtl = [self placeableAt:p];
         if (_dragCtl)
             _dragOffset = CGSizeMake(_dragCtl.layer.position.x - p.x, _dragCtl.layer.position.y - p.y);
@@ -1318,3 +2121,121 @@ static CGFloat q3e_menu_hit_radius(void) {
 }
 
 @end
+
+// ---- keyboard: the C surface ios_glue.c registers as console commands --------
+// Injection exists because a headless simulator can deliver neither a hardware
+// keystroke nor a tap on the virtual keyboard to the guest, so the only way to
+// PROVE the path is to enter it where UIKit does: -insertText: for characters,
+// the press router for key events (via the same HID table, looked up backwards).
+
+@interface Q3EInputView (Keyboard) <UIKeyInput>
+- (void)syncKeyboard;
+- (void)pasteFromClipboard;
+- (void)insertPastedString:(NSString *)s;
+- (void)dismissKeyboard;
+@end
+
+void Q3E_Keyboard_SetMode(int mode) {
+    kbd_mode = (mode < 0 || mode > 2) ? 0 : mode;
+    // Asking for the keyboard by name is explicit and clears a stuck dismiss.
+    kbd_dismissed = NO;
+    kbd_seq++;
+    Q3EInputView *v = q3e_input_view;
+    if (v) dispatch_async(dispatch_get_main_queue(), ^{ [v syncKeyboard]; });
+}
+
+int Q3E_Keyboard_GetMode(void) { return kbd_mode; }
+
+void Q3E_Keyboard_DumpLine(char *out, int len) {
+    snprintf(out, (size_t)len,
+             "resp=%d text=%d mode=%s dismissed=%d keys=%d chars=%d last=%s seq=%d",
+             (int)kbd_responder, (int)kbd_textMode,
+             kbd_mode == 0 ? "auto" : (kbd_mode == 1 ? "on" : "off"),
+             (int)kbd_dismissed,
+             kbd_keyEvents, kbd_charEvents, kbd_last, kbd_seq);
+}
+
+// Tap the accessory bar's "Dismiss ⌨" button from the console — the only way to
+// exercise the sticky-dismiss path headlessly, since nothing can tap a UIToolbar
+// item on a device we are driving over a socket.
+void Q3E_Keyboard_Dismiss(void) {
+    Q3EInputView *v = q3e_input_view;
+    if (!v) return;
+    dispatch_async(dispatch_get_main_queue(), ^{ [v dismissKeyboard]; });
+}
+
+// Fire the accessory bar's Paste button from the console. A headless simulator
+// cannot tap a UIToolbar item, so this enters at the button's own action — the
+// clipboard read, the newline strip and the length cap are all under test.
+void Q3E_Keyboard_Paste(const char *literal) {
+    Q3EInputView *v = q3e_input_view;
+    if (!v) return;
+    if (literal && literal[0]) {
+        // Everything after the clipboard read, driven from the console: the
+        // newline strip, the length cap and the insertText: filter.
+        NSString *s = [NSString stringWithUTF8String:literal];
+        if (!s) return;
+        dispatch_async(dispatch_get_main_queue(), ^{ [v insertPastedString:s]; });
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{ [v pasteFromClipboard]; });
+}
+
+void Q3E_Keyboard_InjectText(const char *utf8) {
+    if (!utf8 || !utf8[0]) return;
+    NSString *s = [NSString stringWithUTF8String:utf8];
+    if (!s) return;
+    Q3EInputView *v = q3e_input_view;
+    if (!v) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // The mode gate is the point of the fault injection: with the responder
+        // forced down, UIKit would never call -insertText: either.
+        if (kbd_mode == 2 || !v.isFirstResponder) {
+            Com_Printf("KBDTYPE REFUSED (responder=%d mode=%d)\n",
+                       (int)v.isFirstResponder, kbd_mode);
+            return;
+        }
+        [v insertText:s];
+    });
+}
+
+void Q3E_Keyboard_InjectKey(const char *name, int down) {
+    if (!name || !name[0]) return;
+    Q3EInputView *v = q3e_input_view;
+    if (!v) return;
+    // Reverse the SAME table the press router reads forwards; a printable key
+    // has no entry and travels as its own character, exactly as UIKey reports it.
+    UIKeyboardHIDUsage code = 0;
+    for (size_t i = 0; i < sizeof(q3e_keymap) / sizeof(q3e_keymap[0]); i++) {
+        if (!strcasecmp(q3e_keymap[i].name, name)) { code = q3e_keymap[i].code; break; }
+    }
+    // Cmd_Argv hands back a rotating engine buffer — copy before the hop.
+    NSString *nsname = [NSString stringWithUTF8String:name];
+    if (!nsname) return;
+    NSString *chars = code ? @"" : nsname;
+    UIKeyboardHIDUsage useCode = code;
+    BOOL isDown = down ? YES : NO;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (kbd_mode == 2 || !v.isFirstResponder) {
+            Com_Printf("KBDKEY REFUSED (responder=%d mode=%d)\n",
+                       (int)v.isFirstResponder, kbd_mode);
+            return;
+        }
+        char one[2];
+        const char *resolved = q3e_keyname_for(useCode, chars, one, sizeof(one));
+        if (!resolved) { Com_Printf("KBDKEY unknown key '%s'\n", nsname.UTF8String); return; }
+        Q3E_QueueNamedKey(resolved, isDown ? 1 : 0);
+        kbd_keyEvents++;
+        kbd_seq++;
+        snprintf(kbd_last, sizeof(kbd_last), "key:%s:%s", resolved, isDown ? "down" : "up");
+        // The companion character -routePresses: emits for BACKSPACE. An
+        // injector that skips it is not simulating a keyboard: deletion lives
+        // in Field_CharEvent (ctrl-h), so without this the suite could type but
+        // never delete, and the case written to catch R4.9's backspace bug
+        // failed against a correct engine.
+        if (isDown && !strcmp(resolved, "BACKSPACE")) {
+            Q3E_QueueChar(8);
+            kbd_charEvents++;
+        }
+    });
+}

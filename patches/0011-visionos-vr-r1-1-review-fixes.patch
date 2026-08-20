@@ -1,0 +1,359 @@
+--- a/code/renderervk/vk.c
++++ b/code/renderervk/vk.c
+@@ -3329,6 +3329,22 @@
+ static int         q3s_depth_copies = 0;
+ static VkFence     q3s_last_submit_fence = VK_NULL_HANDLE;
+ 
++// True when a blend factor pair depends on the destination alpha this renderer
++// writes. Those pipelines keep the historic alpha behaviour: they are the only
++// ones that can observe it, so they are the only ones that could regress.
++static qboolean vk_blend_reads_dst_alpha( VkBlendFactor src, VkBlendFactor dst )
++{
++	int i;
++	const VkBlendFactor f[2] = { src, dst };
++	for ( i = 0; i < 2; i++ ) {
++		if ( f[i] == VK_BLEND_FACTOR_DST_ALPHA ||
++		     f[i] == VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA ||
++		     f[i] == VK_BLEND_FACTOR_SRC_ALPHA_SATURATE )
++			return qtrue;
++	}
++	return qfalse;
++}
++
+ // visionOS VR (patch 0010): the 2D redirect. Quake 3's HUD, scoreboard, chat and
+ // console are a flat 2D command stream drawn into whatever the scene was drawn
+ // into — so in stereo they land in BOTH eye buffers at screen parallax, which is
+@@ -3350,6 +3366,12 @@
+ static int         q3s_field = 0;            // 1 = left field, 2 = right field
+ static int         q3s_ui_split[2];          // did the 2D split happen, per field
+ static int         q3s_world_drawn[2];       // did a world view draw, per field
++int                q3s_swallow2D = 0;        // discard the right field's repeat 2D
++// Alpha blend factors as BUILT, for the standard and additive 2D blends. -1 =
++// no pipeline of that class has been created yet.
++int vk_vr_alpha_blended[2]  = { -1, -1 };
++int vk_vr_alpha_additive[2] = { -1, -1 };
++int vk_vr_swallowed2D = 0;                   // right-field 2D streams discarded
+ void vk_vr_ui_snapshot( void );
+ void vk_vr_ui_split( void );
+ void vk_vr_ui_field( int field );
+@@ -3667,8 +3689,19 @@
+ 			// created image here is the trap patch 0007 documented.
+ 			if ( vk_vr_wanted ) {
+ 				create_color_attachment( glConfig.vidWidth, glConfig.vidHeight, VK_SAMPLE_COUNT_1_BIT, vk.color_format,
+-					VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &q3s_ui_image, &q3s_ui_image_view,
++					VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
++					&q3s_ui_image, &q3s_ui_image_view,
+ 					VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, qfalse );
++				// The freshness counter belongs to THIS image. Leaving it running
++				// across a vid_restart tells the compositor that a brand-new,
++				// never-written image is a live HUD — and VR entry restarts the
++				// renderer by design, so that is the normal path, not an edge.
++				// The image itself needs no explicit clear: the first snapshot
++				// is a FULL-extent copy, and with the counter reset here the
++				// compositor will not sample the layer until that snapshot has
++				// happened. Uninitialised contents are unreachable rather than
++				// merely unlikely.
++				vk_vr_ui_frames = 0;
+ 			}
+ 		}
+ 
+@@ -6732,6 +6765,53 @@
+ 		attachment_blend_state.dstAlphaBlendFactor = attachment_blend_state.dstColorBlendFactor;
+ 		attachment_blend_state.colorBlendOp = VK_BLEND_OP_ADD;
+ 		attachment_blend_state.alphaBlendOp = VK_BLEND_OP_ADD;
++
++		// visionOS VR (patch 0011): the alpha channel has to mean COVERAGE.
++		//
++		// Reusing the colour factors for alpha is harmless for as long as nobody
++		// reads the result — which was true of this renderer until the VR 2D
++		// redirect started compositing the 2D stream over the world as a
++		// premultiplied layer. Then it stops being harmless in two ways:
++		//   * a half-transparent HUD fill blends alpha with the same
++		//     (SRC_ALPHA, 1-SRC_ALPHA) pair, landing at a*a — 0.25 for a=0.5 —
++		//     so the layer lets three quarters of the world through where it
++		//     should let half;
++		//   * an ADDITIVE draw (GL_ONE, GL_ONE — every muzzle glow and most of
++		//     what CPMA and OSP HUDs are made of) accumulates alpha it must not
++		//     have, so a thing whose entire purpose is to ADD light ends up
++		//     OCCLUDING the world behind it.
++		//
++		// So: additive draws add light and no coverage; everything else
++		// accumulates coverage with the over-operator's own factors. Shaders that
++		// READ destination alpha are left exactly as they were — they depend on
++		// what this used to write, and they are the only ones that can tell.
++		//
++		// Gated on vk_vr_wanted so the iPhone app and the oracle keep the current
++		// behaviour bit for bit; VR entry restarts the renderer, which rebuilds
++		// every pipeline, so the gate is live by the time a UI layer exists.
++		if ( vk_vr_wanted && !vk_blend_reads_dst_alpha( attachment_blend_state.srcColorBlendFactor,
++		                                                attachment_blend_state.dstColorBlendFactor ) ) {
++			if ( attachment_blend_state.dstColorBlendFactor == VK_BLEND_FACTOR_ONE ) {
++				attachment_blend_state.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
++				attachment_blend_state.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
++			} else {
++				attachment_blend_state.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
++				attachment_blend_state.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
++			}
++		}
++
++		// What was BUILT, for the two blends the HUD is made of. Reported rather
++		// than restated: a dump that re-derives the rule cannot notice the rule
++		// failing to reach a pipeline.
++		if ( attachment_blend_state.srcColorBlendFactor == VK_BLEND_FACTOR_SRC_ALPHA &&
++		     attachment_blend_state.dstColorBlendFactor == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA ) {
++			vk_vr_alpha_blended[0] = (int)attachment_blend_state.srcAlphaBlendFactor;
++			vk_vr_alpha_blended[1] = (int)attachment_blend_state.dstAlphaBlendFactor;
++		} else if ( attachment_blend_state.srcColorBlendFactor == VK_BLEND_FACTOR_ONE &&
++		            attachment_blend_state.dstColorBlendFactor == VK_BLEND_FACTOR_ONE ) {
++			vk_vr_alpha_additive[0] = (int)attachment_blend_state.srcAlphaBlendFactor;
++			vk_vr_alpha_additive[1] = (int)attachment_blend_state.dstAlphaBlendFactor;
++		}
+ 
+ 		if ( def->allow_discard && vkSamples != VK_SAMPLE_COUNT_1_BIT && depth_stencil_state.depthWriteEnable == VK_FALSE ) {
+ 			// try to reduce pixel fillrate for transparent surfaces, this yields 1..10% fps increase when multisampling in enabled
+@@ -8090,6 +8170,12 @@
+ }
+ 
+ int VK_GetVRUIFrames( void ) { return vk_vr_ui_frames; }
++int VK_GetVRSwallowed2D( void ) { return vk_vr_swallowed2D; }
++void VK_GetVRUIAlpha( int *blended, int *additive )
++{
++	if ( blended )  { blended[0] = vk_vr_alpha_blended[0];  blended[1] = vk_vr_alpha_blended[1]; }
++	if ( additive ) { additive[0] = vk_vr_alpha_additive[0]; additive[1] = vk_vr_alpha_additive[1]; }
++}
+ void VK_SetVRUIRedirect( int on ) { vk_vr_ui_redirect = on ? 1 : 0; }
+ int VK_GetVRUIRedirect( void ) { return vk_vr_ui_redirect; }
+ 
+@@ -8178,16 +8264,16 @@
+ same queue ordering as the per-eye snapshot beside it.
+ =================
+ */
+-void vk_vr_ui_snapshot( void )
++// The colour attachment, copied whole into `dst`, with the layout round trip
++// either side. Shared by the per-eye snapshot and the UI layer snapshot, which
++// were the same twenty lines twice.
++static void vk_copy_color_image_to( VkImage dst )
+ {
+ 	VkImageCopy region;
+ 
+-	if ( q3s_ui_image == VK_NULL_HANDLE || vk.color_image == VK_NULL_HANDLE )
+-		return;
+-
+ 	record_image_layout_transition( vk.cmd->command_buffer, vk.color_image, VK_IMAGE_ASPECT_COLOR_BIT,
+ 		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 0 );
+-	record_image_layout_transition( vk.cmd->command_buffer, q3s_ui_image, VK_IMAGE_ASPECT_COLOR_BIT,
++	record_image_layout_transition( vk.cmd->command_buffer, dst, VK_IMAGE_ASPECT_COLOR_BIT,
+ 		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 0 );
+ 
+ 	Com_Memset( &region, 0, sizeof( region ) );
+@@ -8199,12 +8285,20 @@
+ 	region.extent.height = glConfig.vidHeight;
+ 	region.extent.depth = 1;
+ 	qvkCmdCopyImage( vk.cmd->command_buffer, vk.color_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+-		q3s_ui_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
++		dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
+ 
+-	record_image_layout_transition( vk.cmd->command_buffer, q3s_ui_image, VK_IMAGE_ASPECT_COLOR_BIT,
++	record_image_layout_transition( vk.cmd->command_buffer, dst, VK_IMAGE_ASPECT_COLOR_BIT,
+ 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 0 );
+ 	record_image_layout_transition( vk.cmd->command_buffer, vk.color_image, VK_IMAGE_ASPECT_COLOR_BIT,
+ 		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 0 );
++}
++
++
++void vk_vr_ui_snapshot( void )
++{
++	if ( q3s_ui_image == VK_NULL_HANDLE || vk.color_image == VK_NULL_HANDLE )
++		return;
++	vk_copy_color_image_to( q3s_ui_image );
+ 	vk_vr_ui_frames++;
+ }
+ 
+@@ -8233,7 +8327,23 @@
+ 	if ( q3s_field != 1 && q3s_field != 2 )
+ 		return;
+ 	if ( q3s_ui_split[f] || !q3s_world_drawn[f] )
++		return;
++
++	// The RIGHT field's 2D is the SAME 2D. It was being drawn in full and then
++	// thrown away: the redirect only ever ships the left field's copy, because a
++	// world-space UI panel is mono. Swallowing it instead of drawing it removes,
++	// per host frame at the per-eye extent, one mid-frame render-pass break (a
++	// full tile store, ~25 MB on this target), one full-surface transparent
++	// clear, and every 2D draw call in the field.
++	//
++	// It also puts the right eye's snapshot back where patch 0007 had it — at
++	// end of frame, costing no extra pass at all — because with no 2D to
++	// separate there is nothing to separate it from.
++	if ( q3s_field == 2 ) {
++		q3s_swallow2D = 1;
++		vk_vr_swallowed2D++;
+ 		return;
++	}
+ 
+ 	// Flush what is still batched in tess before the pass ends, or the field's
+ 	// last 3D batch flushes into the wrong side of the split (patch 0007 paid
+@@ -8268,6 +8378,7 @@
+ void vk_vr_ui_field( int field )
+ {
+ 	q3s_field = field;
++	q3s_swallow2D = 0;
+ 	if ( field == 1 ) {
+ 		q3s_ui_split[0] = q3s_ui_split[1] = 0;
+ 		q3s_world_drawn[0] = q3s_world_drawn[1] = 0;
+@@ -8305,27 +8416,8 @@
+ 	if ( vk.color_image == VK_NULL_HANDLE )
+ 		return;
+ 
+-	record_image_layout_transition( vk.cmd->command_buffer, vk.color_image, VK_IMAGE_ASPECT_COLOR_BIT,
+-		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 0 );
+-	record_image_layout_transition( vk.cmd->command_buffer, q3s_eye_image[idx], VK_IMAGE_ASPECT_COLOR_BIT,
+-		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 0 );
+-
+-	Com_Memset( &region, 0, sizeof( region ) );
+-	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+-	region.srcSubresource.layerCount = 1;
+-	region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+-	region.dstSubresource.layerCount = 1;
+-	region.extent.width = glConfig.vidWidth;
+-	region.extent.height = glConfig.vidHeight;
+-	region.extent.depth = 1;
+-	qvkCmdCopyImage( vk.cmd->command_buffer, vk.color_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+-		q3s_eye_image[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
++	vk_copy_color_image_to( q3s_eye_image[idx] );
+ 
+-	record_image_layout_transition( vk.cmd->command_buffer, q3s_eye_image[idx], VK_IMAGE_ASPECT_COLOR_BIT,
+-		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 0 );
+-	record_image_layout_transition( vk.cmd->command_buffer, vk.color_image, VK_IMAGE_ASPECT_COLOR_BIT,
+-		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 0 );
+-
+ 	// visionOS VR (patch 0009): the matching DEPTH copy, at the same boundary and
+ 	// on the same queue, so a pair is colour and depth of the SAME field. The
+ 	// depth attachment rests in DEPTH_STENCIL_ATTACHMENT_OPTIMAL between passes
+@@ -8415,7 +8507,17 @@
+ 	VK_CHECK( qvkWaitForFences( vk.device, 1, &vk.cmd->rendering_finished_fence, VK_FALSE, 1e12 ) );
+ 
+ 	if ( vk.fboActive ) {
+-		if ( vk.capture.image ) {
++		// visionOS VR (patch 0011): in a redirected world frame the colour
++		// attachment holds the SEPARATED 2D stream on a transparent ground — the
++		// HUD, and no game. A screenshot of that is not evidence of anything, and
++		// the measurement protocol this port runs on requires that a performance
++		// number can be shown a content screenshot from the same run. So the
++		// capture reads the LEFT EYE snapshot instead: the world, as rendered,
++		// for the frame that was just presented.
++		if ( vk_vr_active && vk_vr_ui_field_split( 1 ) && q3s_eye_image[0] != VK_NULL_HANDLE ) {
++			srcImageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++			srcImage = q3s_eye_image[0];
++		} else if ( vk.capture.image ) {
+ 			// dedicated capture buffer
+ 			srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+ 			srcImage = vk.capture.image;
+--- a/code/renderervk/tr_backend.c
++++ b/code/renderervk/tr_backend.c
+@@ -24,6 +24,13 @@
+ backEndData_t	*backEndData;
+ backEndState_t	backEnd;
+ 
++#ifdef USE_VULKAN
++// visionOS VR (patch 0011): set by the redirect while the RIGHT field's repeat
++// of the 2D stream is being discarded. Defined in vk.c beside the rest of the
++// redirect's state.
++extern int q3s_swallow2D;
++#endif
++
+ #ifndef USE_VULKAN
+ static const float s_flipMatrix[16] = {
+ 	// convert from our coordinate system (looking down X)
+@@ -1247,6 +1254,15 @@
+ 	shader_t *shader;
+ 
+ 	cmd = (const stretchPicCommand_t *)data;
++
++#ifdef USE_VULKAN
++	// visionOS VR (patch 0011): the right field's repeat of the 2D stream. The
++	// command still has to be STEPPED OVER correctly — the render command list is
++	// a byte stream and each handler returns where the next one starts — so this
++	// is a skip, not a filter applied earlier.
++	if ( q3s_swallow2D )
++		return (const void *)(cmd + 1);
++#endif
+ 
+ 	shader = cmd->shader;
+ 	if ( shader != tess.shader ) {
+@@ -1454,6 +1470,11 @@
+ 	if ( !( backEnd.refdef.rdflags & RDF_NOWORLDMODEL ) ) {
+ 		extern void vk_vr_ui_world_drawn( void );
+ 		vk_vr_ui_world_drawn();
++	} else if ( q3s_swallow2D ) {
++		// An RDF_NOWORLDMODEL scene is HUD content (the 3D head and item icons),
++		// so in the right field it is part of the same repeat. refdef/viewParms
++		// are still assigned above, so nothing downstream reads a stale view.
++		return (const void *)(cmd + 1);
+ 	}
+ #endif
+ 
+@@ -1557,17 +1578,11 @@
+ 				vk_stereo3d_snapshot( 0 );
+ 			}
+ 			vk_begin_main_render_pass();
+-			if ( vk_vr_active && vk_vr_ui_redirect ) {
+-				// Start the right field from a known ground. The world covers the
+-				// viewport in practice, but "in practice" is how the left field's
+-				// HUD would survive into the right eye on the one map where it
+-				// does not.
+-				const vec4_t black = { 0.0f, 0.0f, 0.0f, 1.0f };
+-				const qboolean was2D = backEnd.projection2D;
+-				backEnd.projection2D = qtrue;
+-				vk_clear_color( black );
+-				backEnd.projection2D = was2D;
+-			}
++			// No clear here. The main pass's colour attachment loads DONT_CARE,
++			// so the right field begins undefined whether or not anything was
++			// drawn before it — and the world covering the viewport is the
++			// assumption this renderer already makes on every frame it draws.
++			// Clearing was a full-surface write bought for nothing.
+ 		}
+ 	}
+ 
+--- a/code/client/cl_input.c
++++ b/code/client/cl_input.c
+@@ -644,7 +644,13 @@
+ 
+ 	// The request is the gate: only the VR shell ever writes it, and it writes
+ 	// zero the moment VR is not the mode.
+-	if ( cl_vr_height_request <= 0.0f ) {
++	//
++	// NaN-affirmative, deliberately. A NaN request fails `<= 0.0f`, then fails
++	// `allowed <= applied`, and the else-branch below integrates riseRate every
++	// frame forever: the camera ascends out of the map at 40 units a second and
++	// never stops. Every comparison against a value that came from outside the
++	// engine is written so that "not a number" takes the SAFE arm.
++	if ( !( cl_vr_height_request > 0.0f ) ) {
+ 		applied = ( cl_vr_height_request < 0.0f ) ? cl_vr_height_request : 0.0f;
+ 		cl_vr_height_rise = applied;
+ 		lastTime = 0;
+@@ -722,8 +728,21 @@
+ 		const float delta = ( cl_vr_move_basis_yaw - cl.viewangles[YAW] ) * ( M_PI / 180.0f );
+ 		const float s = sin( delta ), c = cos( delta );
+ 		const float f = cmd->forwardmove, r = cmd->rightmove;
+-		float nf = f * c - r * s;
+-		float nr = f * s + r * c;
++		// NOT a plain rotation. The usercmd's basis is (forward, RIGHT), and
++		// AngleVectors builds right = (sin yaw, -cos yaw) against forward =
++		// (cos yaw, sin yaw) — a LEFT-handed pair, because Quake's yaw increases
++		// to the left. Expressing one such basis in another is the TRANSPOSE of
++		// the rotation, not the rotation.
++		//
++		// Getting it backwards is not a small error: with the head 60 degrees
++		// left of the aim and the stick pushed straight forward, the rotation
++		// form sends a hard strafe to the RIGHT — the player walks up to 120
++		// degrees away from where they are looking. It reads as plausible in a
++		// dump (the magnitudes are right) and is only visible in the SIGN, which
++		// is why the assertion for it now checks the direction of the vector that
++		// goes into the packet rather than the angle that produced it.
++		float nf = f * c + r * s;
++		float nr = r * c - f * s;
+ 		// signed char: the rotation of a corner-pinned (127,127) vector is longer
+ 		// than either axis allows, and letting it wrap turns a diagonal into its
+ 		// opposite.

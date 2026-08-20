@@ -1,0 +1,514 @@
+--- a/code/renderervk/tr_local.h
++++ b/code/renderervk/tr_local.h
+@@ -675,6 +675,45 @@
+ extern int   vk_vr_sky_cull_open;	// R_RecursiveWorldNode skips its plane tests
+ void VK_VRSkyString( char *buf, int size );
+ 
++// --- overlay patch 0017: what the sky draw's GPU state actually IS ---------
++// The 1.0.4.6 device round ran both toggles above and NEITHER changed the
++// picture: the sky is emitted (1-2 batches, 61-69 clipped triangles per eye,
++// per-face bounds at full extent) and it is still black outside a centred
++// rectangle. That exonerates the accumulation and the front-end cull together
++// and moves the question downstream of geometry, to the state the sky is
++// rasterised WITH — which nothing has ever read on the device.
++//
++// So this records it, at the draw, per eye: the viewport and scissor actually
++// in force, the push-constant matrix the GPU actually holds against the one
++// this view's own projection would produce right now (a mismatch IS a stale
++// bind), the pipeline, the depth range, and what each face submitted. The
++// device's eye tangents are wide and asymmetric (l-1.732 r1.000 b-1.192
++// t1.000) while the game FOV stays 90.0 x 73.7 — if any of this state is built
++// from the FOV instead of the tangents, a centred 90 x 74 degree rectangle
++// inside a 105+ degree view is precisely the symptom.
++typedef struct {
++	float	viewport[6];		// x, y, w, h, minDepth, maxDepth
++	int		scissorSet[4];		// x, y, w, h — what the command buffer carries
++	int		scissorWant[4];		// x, y, w, h — what this view's parameters ask for
++	float	mvpBound[16];		// the push constant the GPU actually has
++	float	mvpView[16];		// what this view's projection produces right now
++	int		pipeline;			// -1 = the shader's own (the inner cloud box)
++	int		depthRange;			// Vk_Depth_Range
++	int		mvpPushes;			// push count at capture, so a stale bind is datable
++	int		renderExtent[2];	// vk.renderWidth / vk.renderHeight
++	int		vidExtent[2];		// glConfig.vidWidth / glConfig.vidHeight
++	int		depthDirty;			// something has written depth since the pass began
++} vkVRDrawState_t;
++
++extern int   vk_vr_sky_nodepth;		// the sky is drawn with no depth test at all
++extern unsigned int vk_vr_skybox_nodepth_pipeline;
++extern float vk_vr_mvp_last[16];	// the last matrix pushed as a push constant
++extern int   vk_vr_mvp_pushes;
++
++void VK_VRCaptureDrawState( vkVRDrawState_t *out, int depth_range, int pipeline );
++void VK_VRSkyForceDepthClear( void );
++void VK_VRSkyDrawString( char *buf, int size, int eye );
++
+ // --- overlay patch 0016: the hands, and the gun that rides one -------------
+ // Published through the same rendezvous as the eyes, in the same body frame.
+ extern int   vk_vr_hand_valid[2];	// 0 = that hand is not tracked this frame
+--- a/code/renderervk/tr_sky.c
++++ b/code/renderervk/tr_sky.c
+@@ -60,20 +60,48 @@
+ // re-enters this pass several times per eye, each time with a partial set of
+ // polygons, and reporting only the last of those would read as a narrow sky on
+ // a frame that drew a whole one.
++// --- overlay patch 0017 ----------------------------------------------------
++// `drawn` used to be set immediately BEFORE DrawSkySide, so a face that
++// FillSkySide's own CullSkySide then discarded still reported as drawn — the
++// one thing the device dump could not distinguish from a face that reached the
++// GPU. It now means what its name says, and `culled` carries the other case,
++// with the vertex and index counts each face actually submitted beside them.
+ typedef struct {
+ 	int		batches;
+ 	int		tris;
+ 	int		drawn[6];
++	int		culled[6];			// CullSkySide discarded it at DRAW time
++	int		verts[6];
++	int		idx[6];
+ 	float	mins[6][2];
+ 	float	maxs[6][2];
+ 	float	fovX, fovY;
+ 	float	tan[4];
+ 	int		eye;
++	int		drawStateValid;
++	vkVRDrawState_t	draw;		// the state the FIRST sky draw of the field ran under
++	// overlay patch 0017: WHICH of the two ways a sky can be drawn actually
++	// ran, and the shader that decided. A sky shader with no outer box and no
++	// cloud height draws nothing at all and leaves the colour buffer showing
++	// through — indistinguishable, from a screenshot, from a sky that drew and
++	// was rejected. Naming the shader also lets a device report be reproduced
++	// on a known map instead of "the one with the red sky".
++	int		pathBox;
++	int		pathCloud;
++	int		hasOuterbox;
++	float	cloudHeight;
++	char	shader[MAX_QPATH];
+ } vkSkyDiag_t;
+ 
+ static vkSkyDiag_t	vk_sky_diag[2];		// live, per eye
+ static vkSkyDiag_t	vk_sky_diag_pub[2];	// last complete field, what the dump reads
+ 
++// Which face the FillSkySide call in flight belongs to. Both loops that call it
++// already know; FillSkySide itself never has, which is why its cull verdict was
++// invisible. Set immediately before each call, cleared by nothing — every path
++// into FillSkySide sets it first.
++static int			vk_sky_diag_face = -1;
++
+ static void VK_VRSkyReset( int eye )
+ {
+ 	int i;
+@@ -99,26 +127,106 @@
+ {
+ 	const vkSkyDiag_t *l = &vk_sky_diag_pub[0];
+ 	const vkSkyDiag_t *r = &vk_sky_diag_pub[1];
+-	char faces[256];
++	// overlay patch 0017: sized from the worst case rather than from a guess.
++	// The old 256 was one entry short of six faces at their longest — a face
++	// that is SKIPPED prints the 9999 sentinel four times, 42 characters — so a
++	// frame with no sky in it at all (indoors, a menu) printed
++	// "Com_sprintf: overflow of 43 in 42" on every dump instead of its last
++	// face. That is 42 + 4x43 = 214 used, 42 left, 43 wanted: exactly the
++	// message the device saw.
++	//
++	// The worst entry now is a separator, one digit, a colon, "drawn", and four
++	// %.2f that can each reach "-99999.00" (9), plus the two counts:
++	// 1+1+1+5+1+ 9+1+9+2+9+1+9 +1 = 50, and v/i with six and seven digits is
++	// another 15. Sixty-five each, six of them, 390 — rounded up with room for
++	// a format that grows again.
++	char faces[512];
+ 	int i, used = 0;
+ 
+ 	faces[0] = '\0';
+ 	for ( i = 0; i < 6; i++ ) {
+ 		used += Com_sprintf( faces + used, (int)sizeof( faces ) - used,
+-			"%s%d:%s(%.2f,%.2f..%.2f,%.2f)", i ? " " : "", i,
+-			l->drawn[i] ? "drawn" : "skip",
+-			l->mins[i][0], l->mins[i][1], l->maxs[i][0], l->maxs[i][1] );
++			"%s%d:%s(%.2f,%.2f..%.2f,%.2f)v%di%d", i ? " " : "", i,
++			l->culled[i] ? "cull" : l->drawn[i] ? "drawn" : "skip",
++			l->mins[i][0], l->mins[i][1], l->maxs[i][0], l->maxs[i][1],
++			l->verts[i], l->idx[i] );
+ 		if ( used >= (int)sizeof( faces ) - 1 )
+ 			break;
+ 	}
+ 	Com_sprintf( buf, size,
+-		"SKYNOW vr=%s accopen=%d cullopen=%d | L batches=%d tris=%d fov=(%.1f,%.1f) "
+-		"tan=(l%.3f,r%.3f,b%.3f,t%.3f) | R batches=%d tris=%d | faces %s",
++		"SKYNOW vr=%s accopen=%d cullopen=%d nodepth=%d | L batches=%d tris=%d fov=(%.1f,%.1f) "
++		"tan=(l%.3f,r%.3f,b%.3f,t%.3f) | R batches=%d tris=%d | "
++		"path=%s shader=%s outerbox=%d cloudheight=%.0f | faces %s",
+ 		vk_vr_active ? "on" : "off", vk_vr_sky_acc_open, vk_vr_sky_cull_open,
++		vk_vr_sky_nodepth,
+ 		l->batches, l->tris, l->fovX, l->fovY,
+ 		l->tan[0], l->tan[1], l->tan[2], l->tan[3],
+-		r->batches, r->tris, faces );
++		r->batches, r->tris,
++		( l->pathBox && l->pathCloud ) ? "box+cloud" : l->pathBox ? "box"
++			: l->pathCloud ? "cloud" : "none",
++		l->shader[0] ? l->shader : "(none)", l->hasOuterbox, l->cloudHeight,
++		faces );
+ }
++
++
++/*
++=================
++VK_VRSkyDrawString
++
++overlay patch 0017 — SKYDRAW: the GPU state the sky was actually rasterised
++with, per eye, captured at the first sky draw of each field.
++
++Read it as three questions, in this order:
++  * do `mvpbound` and `mvpview` agree? They are the matrix the GPU is holding
++    and the matrix this view's projection produces. A difference is a stale
++    bind, and [0]/[5] carry the frustum's own scale, [8]/[9] its off-centre
++    terms — which is where a game-FOV matrix and a per-eye one differ.
++  * do `scset` and `scwant` agree, and does the viewport cover the render
++    extent? A rectangle smaller than the eye is a rectangle of picture.
++  * `depthdirty` with a face count that reached the GPU means geometry was
++    submitted and something rejected it; `q3evrskydepth 1` then says whether
++    the depth test was what did.
++Matrix terms are printed, not summarised: a fingerprint that folds them
++together cannot say WHICH term moved.
++
++ONE EYE PER LINE, deliberately: the black box formats a record into an 800-byte
++buffer, and two of these in one line would be silently truncated — losing the
++right eye's terms, which is the half a stereo bug is most likely to live in.
++=================
++*/
++void VK_VRSkyDrawString( char *buf, int size, int eye )
++{
++	const vkSkyDiag_t *d;
++	const vkVRDrawState_t *s;
++
++	if ( eye < 0 || eye > 1 )
++		eye = 0;
++	d = &vk_sky_diag_pub[eye];
++	s = &d->draw;
++
++	if ( !d->drawStateValid ) {
++		Com_sprintf( buf, size, "SKYDRAW eye=%s vr=%s nodepth=%d state=nodraw",
++			eye ? "R" : "L", vk_vr_active ? "on" : "off", vk_vr_sky_nodepth );
++		return;
++	}
++
++	Com_sprintf( buf, size,
++		"SKYDRAW eye=%s vr=%s nodepth=%d vp=(%.0f,%.0f,%.0fx%.0f,d%.2f..%.2f) "
++		"scset=(%d,%d,%dx%d) scwant=(%d,%d,%dx%d) "
++		"render=%dx%d vid=%dx%d pipe=%d depthrange=%d depthdirty=%d pushes=%d "
++		"mvpbound=(%.4f,%.4f,%.4f,%.4f,%.4f,%.4f) mvpview=(%.4f,%.4f,%.4f,%.4f,%.4f,%.4f)",
++		eye ? "R" : "L", vk_vr_active ? "on" : "off", vk_vr_sky_nodepth,
++		s->viewport[0], s->viewport[1], s->viewport[2], s->viewport[3],
++		s->viewport[4], s->viewport[5],
++		s->scissorSet[0], s->scissorSet[1], s->scissorSet[2], s->scissorSet[3],
++		s->scissorWant[0], s->scissorWant[1], s->scissorWant[2], s->scissorWant[3],
++		s->renderExtent[0], s->renderExtent[1], s->vidExtent[0], s->vidExtent[1],
++		s->pipeline, s->depthRange, s->depthDirty, s->mvpPushes,
++		s->mvpBound[0], s->mvpBound[5], s->mvpBound[8], s->mvpBound[9],
++		s->mvpBound[10], s->mvpBound[14],
++		s->mvpView[0], s->mvpView[5], s->mvpView[8], s->mvpView[9],
++		s->mvpView[10], s->mvpView[14] );
++}
+ static float	sky_min, sky_max;
+ static float	sky_min_depth;
+ 
+@@ -351,6 +459,13 @@
+ 		d->tan[1] = vk_vr_eye_tangents[e][1];
+ 		d->tan[2] = vk_vr_eye_tangents[e][2];
+ 		d->tan[3] = vk_vr_eye_tangents[e][3];
++		// overlay patch 0017: the shader that owns this sky, and what it
++		// offers. Recorded here because this is where the batch's shader is in
++		// hand, once per batch, before either draw path has had its say.
++		Q_strncpyz( d->shader, input->shader->name, sizeof( d->shader ) );
++		d->cloudHeight = input->shader->sky.cloudHeight;
++		d->hasOuterbox = ( input->shader->sky.outerbox[0] &&
++			input->shader->sky.outerbox[0] != tr.defaultImage ) ? 1 : 0;
+ 	}
+ 
+ 	for ( i = 0; i < input->numIndexes; i += 3 )
+@@ -488,9 +603,23 @@
+ 	const int tHeight = maxs[1] - mins[1] + 1;
+ 	const int sWidth = maxs[0] - mins[0] + 1;
+ 	int s, t;
++#ifdef USE_VULKAN
++	// overlay patch 0017: the cull nobody was measuring. This one runs AFTER
++	// the accumulated bounds have been decided and quantized, against
++	// backEnd.viewParms.frustum, and it throws away a whole face at a time —
++	// so neither of the R2.3 toggles (accumulated bounds, world-node frustum
++	// test) can reach it, which is consistent with both of them coming back
++	// innocent on the device.
++	vkSkyDiag_t *fdiag = &vk_sky_diag[ ( backEnd.viewParms.vrEye == 1 ) ? 1 : 0 ];
++	const int fface = ( vk_sky_diag_face >= 0 && vk_sky_diag_face < 6 ) ? vk_sky_diag_face : 0;
++#endif
+ 
+-	if ( CullSkySide( mins, maxs ) )
++	if ( CullSkySide( mins, maxs ) ) {
++#ifdef USE_VULKAN
++		fdiag->culled[fface] = 1;
++#endif
+ 		return;
++	}
+ 
+ #if ( (SKY_SUBDIVISIONS+1) * (SKY_SUBDIVISIONS+1) * 6 > SHADER_MAX_VERTEXES )
+ 	if ( tess.numVertexes + tHeight * sWidth > SHADER_MAX_VERTEXES )
+@@ -532,6 +661,15 @@
+ 			tess.numIndexes++;
+ 		}
+ 	}
++
++#ifdef USE_VULKAN
++	// overlay patch 0017: what this face actually emitted. `drawn` is recorded
++	// HERE — past the cull, with geometry in hand — rather than at the call
++	// site, where it only ever meant "we were about to try".
++	fdiag->drawn[fface] = 1;
++	fdiag->verts[fface] += tess.numVertexes - vertexStart;
++	fdiag->idx[fface] += ( tHeight - 1 ) * ( sWidth - 1 ) * 6;
++#endif
+ }
+ 
+ 
+@@ -546,12 +684,25 @@
+ 	{
+ 		GL_Bind( image );
+ #ifdef USE_VULKAN
++		// overlay patch 0017: the pipeline and the state it will run under.
++		const int skyRange = r_showsky->integer ? DEPTH_RANGE_ZERO : DEPTH_RANGE_ONE;
++		const uint32_t skyPipe = vk_vr_sky_nodepth ? vk_vr_skybox_nodepth_pipeline
++		                                           : vk.skybox_pipeline;
++		vkSkyDiag_t *ddiag = &vk_sky_diag[ ( backEnd.viewParms.vrEye == 1 ) ? 1 : 0 ];
++
+ 		tess.svars.texcoordPtr[0] = tess.texCoords[0];
+ 
+-		vk_bind_pipeline( vk.skybox_pipeline );
++		vk_bind_pipeline( skyPipe );
+ 		vk_bind_index();
+ 		vk_bind_geometry( TESS_XYZ | TESS_ST0 );
+-		vk_draw_geometry( r_showsky->integer ? DEPTH_RANGE_ZERO : DEPTH_RANGE_ONE, qtrue );
++		// Captured BEFORE the draw and only once per field: every sky draw in a
++		// field runs under the same view state, and one record per eye is what
++		// a one-line dump can carry honestly.
++		if ( !ddiag->drawStateValid ) {
++			VK_VRCaptureDrawState( &ddiag->draw, skyRange, (int)skyPipe );
++			ddiag->drawStateValid = 1;
++		}
++		vk_draw_geometry( (Vk_Depth_Range)skyRange, qtrue );
+ #else
+ 		qglVertexPointer( 3, GL_FLOAT, 16, tess.xyz );
+ 		qglTexCoordPointer( 2, GL_FLOAT, 0, tess.texCoords[0] );
+@@ -642,7 +793,9 @@
+ 			}
+ 		}
+ 
+-		diag->drawn[i] = 1;
++		// overlay patch 0017: tell FillSkySide which face this is, so its own
++		// cull verdict lands on the right row of the dump.
++		vk_sky_diag_face = i;
+ 		DrawSkySide( shader->sky.outerbox[sky_texorder[i]], sky_mins_subd, sky_maxs_subd );
+ 	}
+ }
+@@ -750,7 +903,7 @@
+ 			}
+ 		}
+ 
+-		diag->drawn[i] = 1;
++		vk_sky_diag_face = i;
+ 		FillSkySide( sky_mins_subd, sky_maxs_subd, s_cloudTexCoords[i] );
+ 	}
+ }
+@@ -989,9 +1142,19 @@
+ 	}
+ #endif
+ 
++#ifdef USE_VULKAN
++	// overlay patch 0017 (DIAGNOSTIC): make the depth buffer unable to reject
++	// the sky. Sky sorts ahead of the opaque world, so at this point the buffer
++	// should already be clear for this view — if clearing it here changes the
++	// picture, it was not, and that is the answer.
++	if ( vk_vr_sky_nodepth )
++		VK_VRSkyForceDepthClear();
++#endif
++
+ 	// draw the outer skybox
+ 	if ( tess.shader->sky.outerbox[0] && tess.shader->sky.outerbox[0] != tr.defaultImage ) {
+ #ifdef USE_VULKAN
++		vk_sky_diag[ ( backEnd.viewParms.vrEye == 1 ) ? 1 : 0 ].pathBox = 1;
+ 		DrawSkyBox( tess.shader );
+ #else
+ 		GL_ClientState( 1, CLS_NONE );
+@@ -1012,6 +1175,22 @@
+ 
+ 	// draw the inner skybox
+ 	if ( tess.numVertexes ) {
++#ifdef USE_VULKAN
++		// overlay patch 0017: the CLOUD path's own draw state. Most stock
++		// arenas draw their sky through here rather than through the outer box,
++		// so a probe that only instrumented DrawSkySide would report `nodraw`
++		// on exactly the maps the device symptom shows up on. The pipeline is
++		// the shader's own and is chosen inside RB_StageIteratorGeneric, so it
++		// is reported as -1 rather than guessed at.
++		{
++			vkSkyDiag_t *cdiag = &vk_sky_diag[ ( backEnd.viewParms.vrEye == 1 ) ? 1 : 0 ];
++			cdiag->pathCloud = 1;
++			if ( !cdiag->drawStateValid ) {
++				VK_VRCaptureDrawState( &cdiag->draw, (int)tess.depthRange, -1 );
++				cdiag->drawStateValid = 1;
++			}
++		}
++#endif
+ 		RB_StageIteratorGeneric();
+ 	}
+ 
+--- a/code/renderervk/vk.c
++++ b/code/renderervk/vk.c
+@@ -2999,6 +2999,14 @@
+ 		def.polygon_offset = qfalse;
+ 		def.mirror = qfalse;
+ 		vk.skybox_pipeline = vk_find_pipeline_ext( 0, &def, qtrue );
++
++		// overlay patch 0017 (DIAGNOSTIC): the same pipeline with the depth
++		// test off, for `q3evrskydepth`. Registered always so the definition
++		// table is identical everywhere, but only GENERATED where VR can ask
++		// for it — the iPhone app and the oracle pay nothing for a pipeline
++		// they have no command to select.
++		def.state_bits = GLS_DEPTHTEST_DISABLE;
++		vk_vr_skybox_nodepth_pipeline = vk_find_pipeline_ext( 0, &def, vk_vr_wanted ? qtrue : qfalse );
+ 	}
+ 
+ 	// stencil shadows
+@@ -3404,6 +3412,31 @@
+ 	if ( cullOpen ) *cullOpen = vk_vr_sky_cull_open;
+ }
+ 
++// --- overlay patch 0017: the depth test the sky is subject to ---------------
++// Both toggles above came back innocent on the device, which leaves the
++// rasterised state. The sky is drawn at the far end of the depth range and does
++// not write depth, so a depth buffer that is not clear where the sky should be
++// rejects it — and the picture that leaves behind is exactly a hole in the sky
++// with the world unaffected, because the world is drawn afterwards.
++//
++// This makes the sky untestable against depth, both ways it can be drawn: the
++// outer skybox gets a pipeline with the test switched off, and the inner cloud
++// box (drawn through the generic shader path, whose pipelines belong to the
++// shader and cannot be rebuilt here) is preceded by an unconditional depth
++// clear. Sky sorts before the opaque world, so that clear discards only what was
++// already in the buffer when the sky pass began — which is the thing under test.
++int vk_vr_sky_nodepth = 0;
++uint32_t vk_vr_skybox_nodepth_pipeline = 0;
++void VK_SetVRSkyNoDepth( int on ) { vk_vr_sky_nodepth = on ? 1 : 0; }
++int  VK_GetVRSkyNoDepth( void )   { return vk_vr_sky_nodepth; }
++
++// The matrix the GPU actually holds. Recorded where it is pushed rather than
++// re-derived by the reader: the defect class this exists to catch is a push
++// constant left behind by an earlier draw, and a re-derivation would reproduce
++// the intent and miss it entirely.
++float vk_vr_mvp_last[16];
++int   vk_vr_mvp_pushes = 0;
++
+ int vk_vr_ui_redirect = 0;                   // shell: this frame is a VR WORLD frame
+ int vk_vr_ui_frames = 0;                     // UI layer snapshots taken (freshness)
+ static VkImage     q3s_ui_image = VK_NULL_HANDLE;
+@@ -7222,11 +7255,105 @@
+ 		get_mvp_transform( push_constants );
+ 
+ 	qvkCmdPushConstants( vk.cmd->command_buffer, vk.pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof( push_constants ), push_constants );
++
++	// overlay patch 0017: keep a copy of what was pushed. This is the only
++	// record of the matrix the GPU is holding at any later draw — the backend
++	// pushes lazily, on entity changes, and it overwrites the view's matrix for
++	// a first-person weapon and restores only the STRUCT afterwards.
++	Com_Memcpy( vk_vr_mvp_last, push_constants, sizeof( push_constants ) );
++	vk_vr_mvp_pushes++;
+ 
+ 	vk.stats.push_size += sizeof( push_constants );
+ }
+ 
+ 
++/*
++=================
++VK_VRCaptureDrawState
++
++overlay patch 0017 — the rasterised state of the draw about to be issued, read
++from the places that decide it rather than restated from the places that intend
++it. `mvpBound` is the push constant in flight; `mvpView` is what this view's own
++projection would produce at this instant. Equal is the healthy answer; different
++means a bind from earlier in the frame is still current, and the difference says
++which one.
++
++`depth_range` is the range the caller is ABOUT to pass to vk_draw_geometry, so
++the viewport reported is the one that draw will run under, not the one left over
++from the previous one. Costs one matrix multiply and is called at most twice per
++eye, from a dev-build diagnostic.
++=================
++*/
++void VK_VRCaptureDrawState( vkVRDrawState_t *out, int depth_range, int pipeline )
++{
++	VkViewport vp;
++	VkRect2D want;
++
++	if ( out == NULL )
++		return;
++
++	Com_Memset( out, 0, sizeof( *out ) );
++
++	if ( !vk.active || vk.cmd == NULL )
++		return;
++
++	get_viewport( &vp, (Vk_Depth_Range)depth_range );
++	out->viewport[0] = vp.x;
++	out->viewport[1] = vp.y;
++	out->viewport[2] = vp.width;
++	out->viewport[3] = vp.height;
++	out->viewport[4] = vp.minDepth;
++	out->viewport[5] = vp.maxDepth;
++
++	out->scissorSet[0] = (int)vk.cmd->scissor_rect.offset.x;
++	out->scissorSet[1] = (int)vk.cmd->scissor_rect.offset.y;
++	out->scissorSet[2] = (int)vk.cmd->scissor_rect.extent.width;
++	out->scissorSet[3] = (int)vk.cmd->scissor_rect.extent.height;
++
++	get_scissor_rect( &want );
++	out->scissorWant[0] = (int)want.offset.x;
++	out->scissorWant[1] = (int)want.offset.y;
++	out->scissorWant[2] = (int)want.extent.width;
++	out->scissorWant[3] = (int)want.extent.height;
++
++	Com_Memcpy( out->mvpBound, vk_vr_mvp_last, sizeof( out->mvpBound ) );
++	get_mvp_transform( out->mvpView );
++
++	out->pipeline = pipeline;
++	out->depthRange = depth_range;
++	out->mvpPushes = vk_vr_mvp_pushes;
++	out->renderExtent[0] = (int)vk.renderWidth;
++	out->renderExtent[1] = (int)vk.renderHeight;
++	out->vidExtent[0] = glConfig.vidWidth;
++	out->vidExtent[1] = glConfig.vidHeight;
++	out->depthDirty = vk_world.dirty_depth_attachment ? 1 : 0;
++}
++
++
++/*
++=================
++VK_VRSkyForceDepthClear
++
++overlay patch 0017 (DIAGNOSTIC) — clear depth whatever the dirty flag says.
++vk_clear_depth's early-out is a correctness optimisation (nothing has written
++depth since the pass began, so there is nothing to clear); this diagnostic is
++asking the opposite question — whether the buffer the sky is tested against
++really is clear — so it must not take that flag's word for it.
++=================
++*/
++void VK_VRSkyForceDepthClear( void )
++{
++	const int wasDirty = vk_world.dirty_depth_attachment;
++
++	if ( !vk.active || vk.cmd == NULL )
++		return;
++
++	vk_world.dirty_depth_attachment = 1;
++	vk_clear_depth( qfalse );
++	vk_world.dirty_depth_attachment = wasDirty;
++}
++
++
+ static VkBuffer shade_bufs[8];
+ static int bind_base;
+ static int bind_count;
