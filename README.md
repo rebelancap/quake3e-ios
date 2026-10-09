@@ -17,12 +17,19 @@ Locked 120 fps on ProMotion at native resolution.
 
 ## Install
 
-**The easy way — the auto-updating source (SideStore / AltStore).** Add the shared
-Quake-ports source, then install Quake III from it; future updates appear
+**The easy way — the auto-updating source (SideStore / AltStore).** Add one of the
+sources below, then install Quake III from it; future updates appear
 automatically:
 
-- iPhone / iPad: `https://raw.githubusercontent.com/rebelancap/quake-ports/main/apps-ios.json`
-- Apple Vision Pro: `https://raw.githubusercontent.com/rebelancap/quake-ports/main/apps-visionos.json`
+| Device | Source | Source URL |
+| --- | --- | --- |
+| iPhone / iPad | Quake ports | `https://raw.githubusercontent.com/rebelancap/quake-ports/main/apps-ios.json` |
+| iPhone / iPad | All ports | `https://raw.githubusercontent.com/rebelancap/all-ports/main/apps-ios.json` |
+| Apple Vision Pro | Quake ports | `https://raw.githubusercontent.com/rebelancap/quake-ports/main/apps-visionos.json` |
+| Apple Vision Pro | All ports | `https://raw.githubusercontent.com/rebelancap/all-ports/main/apps-visionos.json` |
+
+Quake III is in both sources — add either one (Quake ports carries just the
+Quake family; All ports carries every rebelancap port).
 
 On Apple Vision Pro, first install SideStore onto the headset with
 [iloader](https://github.com/rebelancap/iloader/releases#release-visionos), then add
