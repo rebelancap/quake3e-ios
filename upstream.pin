@@ -1,6 +1,6 @@
 # Pinned upstream — the single source of truth for the vendored engine.
 # Phase 1 converts vendor/Quake3e to a git submodule at this exact state.
 url = https://github.com/ec-/Quake3e
-commit = 623982900a132e5c812dcb5231a430f28fafabeb
-date = 2026-07-17 12:37:51 +0300
-subject = Merge PR #416 (net_ip timeout fix, botlib AAS regression fix, Vulkan depth-write discard fix, compiler-warning cleanup)
+commit = 3173cef096dd0cb2fea26d91bce71049061f5a13
+date = 2026-10-14 22:52:57 +0300
+subject = Client: prevent crash on sound capture if sample size is incorrect
