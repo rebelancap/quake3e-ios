@@ -3,6 +3,7 @@
 // the ObjC/Metal side lives in ios_metal.m behind plain C calls.
 
 #include <unistd.h>
+#include <time.h>
 #include <pthread.h>
 
 #include "client/client.h"
@@ -1086,9 +1087,50 @@ void Sys_SetClipboardBitmap(const byte *bitmap, int length) {}
 // ---- Sys_* subset normally provided by unix_main.c (excluded: its
 //      main() and tty console don't apply on iOS) ----
 
+// ---- fatal-error diagnostics (issue #1) ----
+// A sideloaded user cannot see stderr, and exit(1) leaves no crash log in
+// Settings > Analytics, so every Com_Error(ERR_FATAL) looked exactly like a
+// crash and the reports carried no information. Sys_Error now (1) appends the
+// message plus the last console lines to Documents/q3e-fatal.log, which the
+// Files app can read, and (2) shows the message on screen before exiting.
+// The console tail is a memory ring (no per-line disk I/O: charter — nothing
+// logs inside a measured run).
+#define Q3E_TAIL_LINES 48
+#define Q3E_TAIL_WIDTH 640
+static char q3e_tail[Q3E_TAIL_LINES][Q3E_TAIL_WIDTH];
+static int  q3e_tail_head;   // next slot to write
+static int  q3e_tail_count;
+static char q3e_tail_partial[Q3E_TAIL_WIDTH];   // Sys_Print fragments until '\n'
+
+static void q3e_tail_commit(void) {
+	const char *line = q3e_tail_partial;
+	// Privacy: the engine lists every local interface at startup (Sys_ShowIP)
+	// and players attach this file to public issues. Drop those lines.
+	if (line[0] && strncmp(line, "IP: ", 4) != 0 && strncmp(line, "IP6: ", 5) != 0) {
+		Q_strncpyz(q3e_tail[q3e_tail_head], line, Q3E_TAIL_WIDTH);
+		q3e_tail_head = (q3e_tail_head + 1) % Q3E_TAIL_LINES;
+		if (q3e_tail_count < Q3E_TAIL_LINES) q3e_tail_count++;
+	}
+	q3e_tail_partial[0] = '\0';
+}
+
+// Sys_Print is called with fragments ("Q3E_STAMP: " then the value) and with
+// multi-line blocks; reassemble into whole console lines.
+static void q3e_tail_add(const char *msg) {
+	for (const char *p = msg; *p; p++) {
+		if (*p == '\n') { q3e_tail_commit(); continue; }
+		if (*p == '\r') continue;
+		size_t n = strlen(q3e_tail_partial);
+		if (n < Q3E_TAIL_WIDTH - 1) { q3e_tail_partial[n] = *p; q3e_tail_partial[n+1] = '\0'; }
+	}
+}
+
+void Q3E_FatalAlertAndExit(const char *text, const char *logpath); // ios_fatal.m
+
 void QDECL Sys_Error(const char *error, ...) {
 	va_list argptr;
 	char text[4096];
+	char logpath[1200] = "";
 
 	va_start(argptr, error);
 	Q_vsnprintf(text, sizeof(text), error, argptr);
@@ -1096,6 +1138,31 @@ void QDECL Sys_Error(const char *error, ...) {
 
 	fprintf(stderr, "Sys_Error: %s\n", text);
 	fflush(stderr);
+
+	if (q3e_docs[0]) {
+		Com_sprintf(logpath, sizeof(logpath), "%s/q3e-fatal.log", q3e_docs);
+		FILE *f = fopen(logpath, "ab");
+		if (f) {
+			time_t now = time(NULL);
+			char stamp[64];
+			strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", localtime(&now));
+			fprintf(f, "==== %s  build %s\n", stamp, q3e_ios_stamp);
+			const char *tmsg = text;
+			while (*tmsg == '\n' || *tmsg == '\r') tmsg++;   // engine messages often start "\n***"
+			fprintf(f, "Sys_Error: %s\n--- last console lines ---\n", tmsg);
+			if (q3e_tail_partial[0]) q3e_tail_commit();
+			int start = (q3e_tail_head - q3e_tail_count + Q3E_TAIL_LINES) % Q3E_TAIL_LINES;
+			for (int i = 0; i < q3e_tail_count; i++)
+				fprintf(f, "%s\n", q3e_tail[(start + i) % Q3E_TAIL_LINES]);
+			fprintf(f, "==== end\n\n");
+			fclose(f);
+		} else {
+			logpath[0] = '\0';
+		}
+	}
+	const char *amsg = text;
+	while (*amsg == '\n' || *amsg == '\r') amsg++;
+	Q3E_FatalAlertAndExit(amsg, logpath[0] ? logpath : NULL);   // does not return
 	exit(1);
 }
 
@@ -1110,6 +1177,7 @@ void Sys_Init(void) {
 
 void Sys_Print(const char *msg) {
 	fputs(msg, stderr);
+	q3e_tail_add(msg);
 	if (q3e_bridge_active) {
 		Q3E_ConsoleBridge_Output(msg);
 	}

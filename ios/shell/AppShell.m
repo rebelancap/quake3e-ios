@@ -133,11 +133,27 @@ void Q3E_Shell_SetFPSCounter(int enabled) {
     if (!Q3E_HasGameData()) {
         NSLog(@"Q3E-SPIKE: no game data — presenting onboarding");
         dispatch_async(dispatch_get_main_queue(), ^{
-            Q3E_PresentOnboarding(self, ^{ [self bootEngineNow]; });
+            Q3E_PresentOnboarding(self, ^{ [self scheduleBoot]; });
         });
         return;
     }
-    [self bootEngineNow];
+    // Off the layout pass. We are inside the app's FIRST CA commit here; a
+    // fatal engine error raised synchronously from boot (missing paks, Vulkan
+    // init) could never draw its alert because that commit never finished,
+    // and on a device the launch watchdog then kills the app (issue #1 looked
+    // like "crashes on launch" with no crash log). The onboarding path
+    // boots off the layout pass too (see -scheduleBoot).
+    [self scheduleBoot];
+}
+
+// Boot from a run-loop TIMER, never from a main-queue block. A boot-time
+// fatal spins a nested run loop in Q3E_FatalAlertAndExit; CFRunLoop refuses
+// to drain the main dispatch queue while it is nested inside a main-queue
+// callout, so from a dispatch_async the alert drew but never took the Quit
+// tap (UIKit's queued main-queue work starved). A timer callout has no such
+// restriction.
+- (void)scheduleBoot {
+    [self performSelector:@selector(bootEngineNow) withObject:nil afterDelay:0];
 }
 
 - (void)bootEngineNow {

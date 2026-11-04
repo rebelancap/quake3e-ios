@@ -19,9 +19,21 @@ static NSString *docsPath2(void) {
     return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
 }
 
+// The engine's FS_Startup (files.c, upstream) calls Com_Error(ERR_FATAL)
+// unless pak0..pak8 are ALL present in baseq3 with their retail checksums —
+// so "has game data" must mean all nine, not just pak0. Gating on pak0 alone
+// let a player press Start with a partial set and the engine then exited
+// silently, which was reported as "crashes on launch" (issue #1). Checksums
+// are not verified here; a wrong pak still fails in the engine, but that now
+// shows an alert and writes q3e-fatal.log instead of vanishing.
 int Q3E_HasGameData(void) {
-    NSString *pak0 = [docsPath2() stringByAppendingPathComponent:@"baseq3/pak0.pk3"];
-    return [NSFileManager.defaultManager fileExistsAtPath:pak0] ? 1 : 0;
+    NSString *docs = docsPath2();
+    for (int i = 0; i <= 8; i++) {
+        NSString *pak = [docs stringByAppendingPathComponent:
+                         [NSString stringWithFormat:@"baseq3/pak%d.pk3", i]];
+        if (![NSFileManager.defaultManager fileExistsAtPath:pak]) return 0;
+    }
+    return 1;
 }
 
 // One-line human-readable classification of what's installed.
@@ -41,10 +53,21 @@ static NSString *classifyInstall(void) {
     } else {
         [parts addObject:@"Unrecognized pak0.pk3"];
     }
-    if ([fm fileExistsAtPath:[docs stringByAppendingPathComponent:@"baseq3/pak8.pk3"]]) {
+    NSMutableArray *missing = [NSMutableArray array];
+    for (int i = 1; i <= 8; i++) {
+        NSString *name = [NSString stringWithFormat:@"pak%d.pk3", i];
+        if (![fm fileExistsAtPath:[docs stringByAppendingPathComponent:
+                                   [@"baseq3/" stringByAppendingString:name]]]) {
+            [missing addObject:name];
+        }
+    }
+    if (missing.count == 0) {
         [parts addObject:@"1.32 point release ✓"];
     } else {
-        [parts addObject:@"point-release paks (pak1–8) missing — multiplayer may be limited"];
+        [parts addObject:[NSString stringWithFormat:
+            @"REQUIRED point-release files missing: %@ — the game cannot start without "
+             "all of pak0–pak8 from the 1.32 point release (Steam/GOG copies include them)",
+            [missing componentsJoinedByString:@", "]]];
     }
     if ([fm fileExistsAtPath:[docs stringByAppendingPathComponent:@"missionpack/pak0.pk3"]]) {
         [parts addObject:@"Team Arena ✓"];
