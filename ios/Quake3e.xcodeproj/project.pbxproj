@@ -37,8 +37,10 @@
 		5C925608C75E3EA7EE5EE114 /* ios_audio.m in Sources */ = {isa = PBXBuildFile; fileRef = E826F1F0CCAADACCEE5B603C /* ios_audio.m */; };
 		61297CAD9D85A0D91D5EE098 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5612936E65EAA6B94B487548 /* Foundation.framework */; };
 		65A629987B0F5D8630F2839B /* CoreVideo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CDB03F055C45BB54AD8A402B /* CoreVideo.framework */; };
+		711BB2112B29CC9743F82733 /* ios_fatal.m in Sources */ = {isa = PBXBuildFile; fileRef = D2F533B0436CB9A6860B0CDF /* ios_fatal.m */; };
 		715D1C24AEB0F5EFAAE1671C /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 36CC490E0E38BA5D925C297D /* CoreGraphics.framework */; };
 		72A00A9E2FD00D724D0F67ED /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9EF71329A1C7CC7EDC8C611B /* AudioToolbox.framework */; };
+		73023ACB2FFE95A8E3966AEC /* ios_fatal.m in Sources */ = {isa = PBXBuildFile; fileRef = D2F533B0436CB9A6860B0CDF /* ios_fatal.m */; };
 		741FA5F59D121B93F2D2392F /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CC068F6D19C4D3A25A2F1769 /* QuartzCore.framework */; };
 		840DF7FBBCC199983E43949D /* Q3EVR.m in Sources */ = {isa = PBXBuildFile; fileRef = 04DCD76BF71B991FD24804E6 /* Q3EVR.m */; };
 		867E7497BB7D372071DC5E2A /* Assets-visionos.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DF4F3136705C2198860DC481 /* Assets-visionos.xcassets */; };
@@ -107,6 +109,7 @@
 		CDB03F055C45BB54AD8A402B /* CoreVideo.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreVideo.framework; path = System/Library/Frameworks/CoreVideo.framework; sourceTree = SDKROOT; };
 		CEECDE6CEADABABAE320B4D4 /* Q3EIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Q3EIntents.swift; sourceTree = "<group>"; };
 		CFC2926895277A390FCB97B1 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		D2F533B0436CB9A6860B0CDF /* ios_fatal.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ios_fatal.m; sourceTree = "<group>"; };
 		D4DDA206E2BDB5EC07102DF5 /* ios_pakman.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ios_pakman.m; sourceTree = "<group>"; };
 		D9374DF16DD2EDCE039B7896 /* Q3EImmersive.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Q3EImmersive.h; sourceTree = "<group>"; };
 		D9CE7C66352300892A1B6B0D /* AppShell.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AppShell.m; sourceTree = "<group>"; };
@@ -228,6 +231,7 @@
 				0E9B00160D1137ACAE4935A2 /* ios_audio.h */,
 				E826F1F0CCAADACCEE5B603C /* ios_audio.m */,
 				2AC36C1F39314DF1FE314BE7 /* ios_console.m */,
+				D2F533B0436CB9A6860B0CDF /* ios_fatal.m */,
 				7D7173C31A62848743DF3F01 /* ios_glue.c */,
 				2613F93EAAD8CEB8ADDA6187 /* ios_input.h */,
 				64B9DA38E4711DA3D1DAD406 /* ios_input.m */,
@@ -371,6 +375,7 @@
 				FA2E424463ABBC44CA7574B7 /* Q3EIntents.swift in Sources */,
 				27F9BA1985E78C2B5411AD20 /* ios_audio.m in Sources */,
 				A97BDE7175999A5496A08649 /* ios_console.m in Sources */,
+				711BB2112B29CC9743F82733 /* ios_fatal.m in Sources */,
 				F821306993D95659E95D50C3 /* ios_glue.c in Sources */,
 				D89976254862A86FF580079F /* ios_input.m in Sources */,
 				5C4877EB156210EB0C2FF86A /* ios_metal.m in Sources */,
@@ -394,6 +399,7 @@
 				3B61A3E8638070FB91F6E292 /* Q3EVisionApp.swift in Sources */,
 				5C925608C75E3EA7EE5EE114 /* ios_audio.m in Sources */,
 				46B51525D7D2D4AC369CFC1E /* ios_console.m in Sources */,
+				73023ACB2FFE95A8E3966AEC /* ios_fatal.m in Sources */,
 				3EF3A7E612ACC72480EF43CC /* ios_glue.c in Sources */,
 				3C6B2D17CB34D2093C4CF687 /* ios_input.m in Sources */,
 				8891BBB02A45CF2D1FEADA8D /* ios_metal.m in Sources */,
