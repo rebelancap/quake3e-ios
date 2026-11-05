@@ -66,7 +66,8 @@ static NSString *classifyInstall(void) {
     } else {
         [parts addObject:[NSString stringWithFormat:
             @"REQUIRED point-release files missing: %@ — the game cannot start without "
-             "all of pak0–pak8 from the 1.32 point release (Steam/GOG copies include them)",
+             "all of pak0–pak8. pak1–pak8 are id Software's free 1.32 point release "
+             "patch (already included in Steam/GOG copies)",
             [missing componentsJoinedByString:@", "]]];
     }
     if ([fm fileExistsAtPath:[docs stringByAppendingPathComponent:@"missionpack/pak0.pk3"]]) {
@@ -77,6 +78,9 @@ static NSString *classifyInstall(void) {
     for (NSString *entry in [fm contentsOfDirectoryAtPath:docs error:nil]) {
         BOOL isDir = NO;
         [fm fileExistsAtPath:[docs stringByAppendingPathComponent:entry] isDirectory:&isDir];
+        // Dot-directories are never mods: the Files app keeps deleted items in
+        // Documents/.Trash, which showed up as "mods: .Trash" (issue #1).
+        if ([entry hasPrefix:@"."]) continue;
         if (isDir && ![known containsObject:entry] &&
             [fm contentsOfDirectoryAtPath:[NSString pathWithComponents:@[docs, entry]] error:nil].count) {
             [mods addObject:entry];
