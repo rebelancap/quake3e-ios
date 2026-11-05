@@ -837,7 +837,13 @@ static void q3e_ft_report(void) {
 	q3e_sim_wall_us = 0.0;
 }
 
+extern volatile int q3e_fatal_active;   // ios_fatal.m
+
 void Q3E_Frame(void) {
+	// A fatal alert is spinning the main run loop; display-link ticks still
+	// fire inside it and must not re-enter the engine (see ios_fatal.m).
+	if (q3e_fatal_active) return;
+
 	const int64_t begin = Sys_Microseconds();
 
 	if (q3e_bridge_active) {
