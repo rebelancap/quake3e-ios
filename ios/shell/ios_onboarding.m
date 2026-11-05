@@ -12,7 +12,9 @@
 //   * the Files-app drop-in alternate path with a "Check again" button
 //   * a downloader for id's free 1.32 point release (pak1–pak8) when only
 //     pak0 is present (disc installs) — size + SHA-256 pinned, mirrors
-//     untrusted, never overwrites an existing file (issue #1)
+//     untrusted; a present but wrong-version pak (older patch) is replaced
+//     only after the new copy verifies, and the old one is kept renamed to
+//     pakN.pk3.old (issue #1)
 // "Start" enables only when a playable baseq3 is present.
 
 #import <UIKit/UIKit.h>
@@ -21,23 +23,6 @@
 
 static NSString *docsPath2(void) {
     return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-}
-
-// The engine's FS_Startup (files.c, upstream) calls Com_Error(ERR_FATAL)
-// unless pak0..pak8 are ALL present in baseq3 with their retail checksums —
-// so "has game data" must mean all nine, not just pak0. Gating on pak0 alone
-// let a player press Start with a partial set and the engine then exited
-// silently, which was reported as "crashes on launch" (issue #1). Checksums
-// are not verified here; a wrong pak still fails in the engine, but that now
-// shows an alert and writes q3e-fatal.log instead of vanishing.
-int Q3E_HasGameData(void) {
-    NSString *docs = docsPath2();
-    for (int i = 0; i <= 8; i++) {
-        NSString *pak = [docs stringByAppendingPathComponent:
-                         [NSString stringWithFormat:@"baseq3/pak%d.pk3", i]];
-        if (![NSFileManager.defaultManager fileExistsAtPath:pak]) return 0;
-    }
-    return 1;
 }
 
 // ---- 1.32 point release (pak1–pak8) downloader --------------------------
@@ -72,16 +57,98 @@ static NSString *prPakPath(int n) {
             [NSString stringWithFormat:@"baseq3/pak%d.pk3", n]];
 }
 
-// Indices into kPointRelease of the paks that are absent. Empty unless pak0
-// exists: the patch is useless (and not what the user needs) without the game.
-static NSArray<NSNumber *> *prMissing(void) {
-    NSMutableArray *m = [NSMutableArray array];
-    if (![NSFileManager.defaultManager fileExistsAtPath:prPakPath(0)]) return m;
-    for (int i = 0; i < 8; i++) {
-        if (![NSFileManager.defaultManager fileExistsAtPath:prPakPath(kPointRelease[i].n)])
-            [m addObject:@(i)];
+static NSString *prSha256(NSString *path);
+
+// State of one point-release pak in baseq3. A file only counts as good when
+// its size AND SHA-256 match kPointRelease: an older patch's pak1.pk3 (the
+// 1.1.1.2 report on issue #1 — checksum 880411042) passed the old existence
+// test, lit up Start, and then FS_Startup fataled on it.
+typedef enum { PR_MISSING, PR_OK, PR_WRONG } prState;
+
+// Hashing ~26 MB on every launch is wasteful, so each verdict is cached in
+// NSUserDefaults (key per pak) with the file's size + mtime, and the file is
+// re-hashed only when either changes. A size mismatch is WRONG without hashing.
+// pak0 (≈480 MB) is never hashed: the engine checks it and its fatal alert
+// explains a bad one. *hashed / *cached (optional) count hashes run and
+// verdicts answered from the cache.
+static NSString *prCacheKey(int n) { return [NSString stringWithFormat:@"Q3E.prVerdict.pak%d", n]; }
+
+static void prRecordVerdict(int n, NSString *path, BOOL ok) {
+    NSDictionary *a = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
+    if (!a) return;
+    [NSUserDefaults.standardUserDefaults setObject:@{
+        @"size": @(a.fileSize),
+        @"mtime": @(a.fileModificationDate.timeIntervalSince1970),
+        @"ok": @(ok)} forKey:prCacheKey(n)];
+}
+
+static prState prPakState(int idx, int *hashed, int *cached) {
+    const q3ePrPak *p = &kPointRelease[idx];
+    NSString *path = prPakPath(p->n);
+    NSDictionary *a = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
+    if (!a) return PR_MISSING;
+    unsigned long long size = a.fileSize;
+    if (size != p->size) return PR_WRONG;
+    double mtime = a.fileModificationDate.timeIntervalSince1970;
+    NSDictionary *c = [NSUserDefaults.standardUserDefaults dictionaryForKey:prCacheKey(p->n)];
+    if (c && [c[@"size"] unsignedLongLongValue] == size && [c[@"mtime"] doubleValue] == mtime) {
+        if (cached) (*cached)++;
+        return [c[@"ok"] boolValue] ? PR_OK : PR_WRONG;
     }
-    return m;
+    NSString *hash = prSha256(path);
+    if (hashed) (*hashed)++;
+    if (!hash) {
+        // Unreadable right now: don't cache, report wrong (re-checked next time).
+        NSLog(@"Q3E onboarding pr: pak%d.pk3 unreadable, treating as wrong version", p->n);
+        return PR_WRONG;
+    }
+    BOOL ok = [hash isEqualToString:@(p->sha256)];
+    [NSUserDefaults.standardUserDefaults setObject:@{
+        @"size": @(size), @"mtime": @(mtime), @"ok": @(ok)} forKey:prCacheKey(p->n)];
+    NSLog(@"Q3E onboarding pr: hashed pak%d.pk3 (%llu bytes): %@", p->n, size,
+          ok ? @"verified" : [@"WRONG VERSION, sha256 " stringByAppendingString:hash]);
+    return ok ? PR_OK : PR_WRONG;
+}
+
+// Indices into kPointRelease of the paks that are absent (missing) or present
+// with the wrong size/SHA-256 (wrong). Both empty unless pak0 exists: the
+// patch is useless (and not what the user needs) without the game.
+static void prScan(NSMutableArray<NSNumber *> *missing, NSMutableArray<NSNumber *> *wrong) {
+    if (![NSFileManager.defaultManager fileExistsAtPath:prPakPath(0)]) return;
+    for (int i = 0; i < 8; i++) {
+        prState st = prPakState(i, NULL, NULL);
+        if (st == PR_MISSING) [missing addObject:@(i)];
+        else if (st == PR_WRONG) [wrong addObject:@(i)];
+    }
+}
+
+// Everything the downloader must fetch: missing + wrong, in pak order.
+static NSArray<NSNumber *> *prNeeded(void) {
+    NSMutableArray *m = [NSMutableArray array], *w = [NSMutableArray array];
+    prScan(m, w);
+    [m addObjectsFromArray:w];
+    return [m sortedArrayUsingSelector:@selector(compare:)];
+}
+
+// The engine's FS_Startup (files.c, upstream) calls Com_Error(ERR_FATAL)
+// unless pak0..pak8 are ALL present in baseq3 with their retail checksums —
+// so "has game data" must mean all nine, not just pak0. Gating on pak0 alone
+// let a player press Start with a partial set and the engine then exited
+// silently, which was reported as "crashes on launch" (issue #1). pak1–pak8
+// must also match their pinned size + SHA-256 (cached, see prPakState); pak0
+// is only tested for presence — a bad pak0 fails in the engine, which shows
+// an alert and writes q3e-fatal.log instead of vanishing.
+int Q3E_HasGameData(void) {
+    if (![NSFileManager.defaultManager fileExistsAtPath:prPakPath(0)]) return 0;
+    int hashed = 0, cached = 0, good = 0, missing = 0;
+    for (int i = 0; i < 8; i++) {
+        prState st = prPakState(i, &hashed, &cached);
+        if (st == PR_OK) good++; else if (st == PR_MISSING) missing++;
+    }
+    NSLog(@"Q3E onboarding pr: game data check: %d/8 point-release paks good, %d missing, "
+          @"%d wrong (%d hashed now, %d verdicts from cache)",
+          good, missing, 8 - good - missing, hashed, cached);
+    return good == 8;
 }
 
 // Streamed SHA-256 of a file as lowercase hex, nil on read error.
@@ -225,22 +292,28 @@ static NSString *classifyInstall(void) {
     } else {
         [parts addObject:@"Unrecognized pak0.pk3"];
     }
-    NSMutableArray *missing = [NSMutableArray array];
-    for (int i = 1; i <= 8; i++) {
-        NSString *name = [NSString stringWithFormat:@"pak%d.pk3", i];
-        if (![fm fileExistsAtPath:[docs stringByAppendingPathComponent:
-                                   [@"baseq3/" stringByAppendingString:name]]]) {
-            [missing addObject:name];
-        }
+    NSMutableArray<NSNumber *> *mi = [NSMutableArray array], *wi = [NSMutableArray array];
+    prScan(mi, wi);
+    NSMutableArray *missing = [NSMutableArray array], *wrong = [NSMutableArray array];
+    for (NSNumber *i in mi) [missing addObject:[NSString stringWithFormat:@"pak%d.pk3", kPointRelease[i.intValue].n]];
+    for (NSNumber *i in wi) [wrong addObject:[NSString stringWithFormat:@"pak%d.pk3", kPointRelease[i.intValue].n]];
+    if (wrong.count) {
+        NSLog(@"Q3E onboarding pr: wrong-version files detected: %@", [wrong componentsJoinedByString:@", "]);
     }
-    if (missing.count == 0) {
+    if (missing.count == 0 && wrong.count == 0) {
         [parts addObject:@"1.32 point release ✓"];
     } else {
+        NSMutableArray *what = [NSMutableArray array];
+        if (missing.count)
+            [what addObject:[@"missing: " stringByAppendingString:[missing componentsJoinedByString:@", "]]];
+        if (wrong.count)
+            [what addObject:[@"wrong version (older patch): " stringByAppendingString:
+                             [wrong componentsJoinedByString:@", "]]];
         [parts addObject:[NSString stringWithFormat:
-            @"REQUIRED point-release files missing: %@ — the game cannot start without "
-             "all of pak0–pak8. pak1–pak8 are id Software's free 1.32 point release "
-             "patch (already included in Steam/GOG copies)",
-            [missing componentsJoinedByString:@", "]]];
+            @"REQUIRED point-release files: %@. The game cannot start without "
+             "the 1.32 versions of all of pak0–pak8. pak1–pak8 are id Software's free 1.32 "
+             "point release patch (already included in Steam/GOG copies)",
+            [what componentsJoinedByString:@"; "]]];
     }
     if ([fm fileExistsAtPath:[docs stringByAppendingPathComponent:@"missionpack/pak0.pk3"]]) {
         [parts addObject:@"Team Arena ✓"];
@@ -374,7 +447,7 @@ static NSString *classifyInstall(void) {
     BOOL ready = Q3E_HasGameData() != 0;
     _startBtn.enabled = ready;
     _startBtn.alpha = ready ? 1.0 : 0.35;
-    NSArray *missing = prMissing();
+    NSArray *missing = prNeeded();   // missing + wrong version
     unsigned long long bytes = 0;
     for (NSNumber *i in missing) bytes += kPointRelease[i.intValue].size;
     _dlBtn.hidden = missing.count == 0;
@@ -383,20 +456,21 @@ static NSString *classifyInstall(void) {
                       bytes / 1e6 < 1 ? 1 : bytes / 1e6]
             forState:UIControlStateNormal];
     NSLog(@"Q3E onboarding status: %@", _status.text);
-    NSLog(@"Q3E onboarding pr: button %@ (%lu missing, %llu bytes)%@",
+    NSLog(@"Q3E onboarding pr: button %@ (%lu missing or wrong, %llu bytes)%@",
           missing.count ? @"shown" : @"hidden", (unsigned long)missing.count, bytes,
           _downloading ? @" [downloading]" : @"");
 }
 
 - (void)confirmPointRelease {
-    if (_downloading || prMissing().count == 0) return;
+    if (_downloading || prNeeded().count == 0) return;
     UIAlertController *a = [UIAlertController
         alertControllerWithTitle:@"Download the 1.32 point release?"
         message:@"pak1–pak8 are id Software's free Quake III Arena 1.32 point-release patch "
                 @"files. They will be downloaded from public mirrors and checked against their "
                 @"known SHA-256 fingerprints before use. Use is subject to id Software's "
-                @"point-release EULA. Only missing files are downloaded; nothing you already "
-                @"have is replaced."
+                @"point-release EULA. Only missing or wrong-version files are downloaded. A "
+                @"wrong-version file (from an older patch) is replaced only after its new copy "
+                @"is verified, and the old one is kept, renamed to .pk3.old."
         preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel
                                         handler:^(UIAlertAction *x) {
@@ -409,7 +483,7 @@ static NSString *classifyInstall(void) {
 }
 
 - (void)downloadPointRelease {
-    NSArray<NSNumber *> *missing = prMissing();
+    NSArray<NSNumber *> *missing = prNeeded();   // missing + wrong version
     if (_downloading || missing.count == 0) return;
     _downloading = YES;
     _dlBtn.enabled = NO;
@@ -461,17 +535,55 @@ static NSString *classifyInstall(void) {
                     [fm removeItemAtPath:tmp error:nil];
                     continue;
                 }
-                // Never overwrite: moveItem fails if dst appeared meanwhile.
+                // Never overwrite or delete. A wrong-version file already at
+                // dst is renamed aside to pakN.pk3.old (.old2, … if taken) —
+                // FS_AddGameDirectory only loads names ending in ".pk3"
+                // (Sys_ListFiles suffix filter + FS_IsExt), so the engine
+                // ignores it — and is put back if the final move fails.
+                // moveItem fails if dst appeared meanwhile.
                 NSError *err = nil;
                 [fm createDirectoryAtPath:dst.stringByDeletingLastPathComponent
               withIntermediateDirectories:YES attributes:nil error:nil];
+                NSString *backup = nil;
+                if ([fm fileExistsAtPath:dst]) {
+                    if (prPakState(idx.intValue, NULL, NULL) == PR_OK) {
+                        // Became good meanwhile (user copied it in): keep theirs.
+                        NSLog(@"Q3E onboarding pr: %@ now verified in place, keeping it", name);
+                        [fm removeItemAtPath:tmp error:nil];
+                        got = YES;
+                        break;
+                    }
+                    for (int k = 1; k < 1000 && !backup; k++) {
+                        NSString *b = [dst stringByAppendingString:
+                                       k == 1 ? @".old" : [NSString stringWithFormat:@".old%d", k]];
+                        if (![fm fileExistsAtPath:b]) backup = b;
+                    }
+                    NSError *berr = nil;
+                    if (!backup || ![fm moveItemAtPath:dst toPath:backup error:&berr]) {
+                        NSLog(@"Q3E onboarding pr: %@ verified but old copy could not be renamed aside: %@",
+                              name, berr ? berr.localizedDescription : @"no free .old name");
+                        [fm removeItemAtPath:tmp error:nil];
+                        break;
+                    }
+                    NSLog(@"Q3E onboarding pr: %@ wrong version renamed aside to %@",
+                          name, backup.lastPathComponent);
+                }
                 if ([fm moveItemAtPath:tmp toPath:dst error:&err]) {
-                    NSLog(@"Q3E onboarding pr: %@ OK from %@ (%llu bytes, sha256 verified)",
-                          name, url.absoluteString, sz);
+                    prRecordVerdict(p->n, dst, YES);
+                    NSLog(@"Q3E onboarding pr: %@ OK from %@ (%llu bytes, sha256 verified)%@",
+                          name, url.absoluteString, sz, backup ? @", replaced wrong version" : @"");
                     got = YES;
                 } else {
                     NSLog(@"Q3E onboarding pr: %@ verified but not installed: %@",
                           name, err.localizedDescription);
+                    if (backup) {
+                        NSError *rerr = nil;
+                        if ([fm moveItemAtPath:backup toPath:dst error:&rerr])
+                            NSLog(@"Q3E onboarding pr: %@ restored from %@", name, backup.lastPathComponent);
+                        else
+                            NSLog(@"Q3E onboarding pr: %@ could NOT be restored from %@: %@",
+                                  name, backup.lastPathComponent, rerr.localizedDescription);
+                    }
                 }
                 [fm removeItemAtPath:tmp error:nil];   // no-op after a successful move
                 break;
@@ -501,6 +613,11 @@ static NSString *classifyInstall(void) {
                     [failed componentsJoinedByString:@", "]];
             }
             [self refreshStatus];
+            // The message sits below the fold on a landscape phone; show it.
+            [self.view layoutIfNeeded];
+            [self->_scroll scrollRectToVisible:[self->_scroll convertRect:self->_progressLabel.bounds
+                                                                 fromView:self->_progressLabel]
+                                      animated:YES];
         });
     });
 }
