@@ -349,9 +349,9 @@ static void hw_motion(float dx, float dy) {
     }
 }
 
-// Wheel. GameController reports the scroll pad with the vertical axis inverted
-// relative to the usual wheel convention (SDL negates it too): y < 0 is the
-// wheel turned AWAY from the player = MWHEELUP (console scrolls back, weapnext
+// Wheel. GameController reports the scroll pad's vertical travel inverted
+// relative to the usual wheel convention (SDL negates it too): a negative raw
+// value is the wheel turned AWAY from the player = MWHEELUP (console scrolls back, weapnext
 // on a stock config). Quantisation: a notched wheel delivers one isolated event
 // per detent, while a trackpad / free-spinning wheel streams small values. So
 // the first event after a pause (or a direction change) is always one step,
@@ -402,8 +402,11 @@ static void attach(GCMouse *m) {
         aux[i].pressedChangedHandler =
             ^(GCControllerButtonInput *bi, float v, BOOL p) { hw_button(id, b, p, 0); };
     }
+    // The vertical wheel arrives in the FIRST axis of the scroll pad, the
+    // horizontal one in the second (SDL's uikit code documents the same; the
+    // 1.1.2.1 test build read the second axis and the wheel did nothing).
     in.scroll.valueChangedHandler =
-        ^(GCControllerDirectionPad *dp, float x, float y) { hw_scroll(y); };
+        ^(GCControllerDirectionPad *dp, float vertical, float horizontal) { hw_scroll(vertical); };
 }
 
 static UIWindowScene *host_scene(void) { return host_vc.view.window.windowScene; }
