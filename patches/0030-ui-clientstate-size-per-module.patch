@@ -1,0 +1,81 @@
+--- a/code/client/cl_ui.c
++++ b/code/client/cl_ui.c
+@@ -73,19 +73,54 @@
+ 
+ /*
+ ====================
+-GetClientState
++CL_UI_ClientStateSize
++
++How many bytes of uiClientState_t the running UI module actually owns.
++
++Only Urban Terror's ui.qvm was built with the trailing serverAddress field;
++every other UI (stock q3_ui, Team Arena, CPMA, OSP, ...) has the original
++3084-byte struct that ends at messageString. Checking and writing the full
++4108 bytes for those modules (issue #6) did two things:
++  * trap_GetClientState() wrote the address string up to 1 KB past the end of
++    the module's struct, i.e. over its caller's stack frame, on every call;
++  * whenever the struct sat within 1 KB of the top of the data segment the
++    bounds check fired instead: stock q3_ui's EXIT confirm (UI_ConfirmMenu,
++    called straight from the key handler, so a shallow stack) dropped with
++    "program tried to bypass data segment bounds" and the game never quit.
++Same game-dir test as the userinfo key in patch 0028: a UrT build that is not
++installed as q3ut4 just goes without the address, as it would on any other
++non-ioUrbanTerror engine.
+ ====================
+ */
+-static void GetClientState( uiClientState_t *state ) {
+-	state->connectPacketCount = clc.connectPacketCount;
+-	state->connState = cls.state;
+-	Q_strncpyz( state->servername, cls.servername, sizeof( state->servername ) );
+-	Q_strncpyz( state->updateInfoString, cls.updateInfoString, sizeof( state->updateInfoString ) );
+-	Q_strncpyz( state->messageString, clc.serverMessage, sizeof( state->messageString ) );
++static int CL_UI_ClientStateSize( void ) {
++	if ( Q_stricmp( FS_GetCurrentGameDir(), "q3ut4" ) == 0 ) {
++		return sizeof( uiClientState_t );
++	}
++	return (int)offsetof( uiClientState_t, serverAddress );
++}
++
++/*
++====================
++GetClientState
++
++Fills a full engine-side struct, then hands the module only the bytes it owns.
++====================
++*/
++static void GetClientState( void *out, int size ) {
++	uiClientState_t state;
++
++	Com_Memset( &state, 0, sizeof( state ) );
++	state.connectPacketCount = clc.connectPacketCount;
++	state.connState = cls.state;
++	Q_strncpyz( state.servername, cls.servername, sizeof( state.servername ) );
++	Q_strncpyz( state.updateInfoString, cls.updateInfoString, sizeof( state.updateInfoString ) );
++	Q_strncpyz( state.messageString, clc.serverMessage, sizeof( state.messageString ) );
+ 	// Urban Terror's auth UI sends its packets from the address of the server
+-	// it is playing on; nothing else reads this.
+-	Q_strncpyz( state->serverAddress, NET_AdrToString( &clc.serverAddress ), sizeof( state->serverAddress ) );
+-	state->clientNum = cl.snap.ps.clientNum;
++	// it is playing on; nothing else reads this (and nothing else receives it,
++	// see CL_UI_ClientStateSize).
++	Q_strncpyz( state.serverAddress, NET_AdrToString( &clc.serverAddress ), sizeof( state.serverAddress ) );
++	state.clientNum = cl.snap.ps.clientNum;
++	Com_Memcpy( out, &state, size );
+ }
+ 
+ 
+@@ -1046,8 +1081,11 @@
+ 		return 0;
+ 
+ 	case UI_GETCLIENTSTATE:
+-		VM_CHECKBOUNDS( uivm, args[1], sizeof( uiClientState_t ) );
+-		GetClientState( VMA(1) );
++		{
++			const int size = CL_UI_ClientStateSize();
++			VM_CHECKBOUNDS( uivm, args[1], size );
++			GetClientState( VMA(1), size );
++		}
+ 		return 0;
+ 
+ 	case UI_GETGLCONFIG:
