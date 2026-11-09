@@ -16,6 +16,7 @@
 		173FB93496B5FBFC59D7FB40 /* CoreMotion.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8D1F0066AA4E688EA48C2FC3 /* CoreMotion.framework */; };
 		185C6F61D28F5C5684A12BB4 /* ios_snd.c in Sources */ = {isa = PBXBuildFile; fileRef = 6FA43AC1FB6966A5F89DA82F /* ios_snd.c */; };
 		1A1B861A4D5B98583A0BEA2B /* GameController.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E54F9A25DC37C6780486BC76 /* GameController.framework */; };
+		1ACE7E0D587D70E58B1564BA /* ios_mouse.m in Sources */ = {isa = PBXBuildFile; fileRef = BD13EC7DC167E63BA83A9EBB /* ios_mouse.m */; };
 		1EE6BF55E4A4D33160540B67 /* Q3EVRGlue.c in Sources */ = {isa = PBXBuildFile; fileRef = 8DAAA39E4A34C35AC99FD4F8 /* Q3EVRGlue.c */; };
 		1EE7471BB794DF2CF1EBDE05 /* Q3EImmersive.m in Sources */ = {isa = PBXBuildFile; fileRef = F19A3D9E8C56D2A21796B565 /* Q3EImmersive.m */; };
 		22936B92BD2143F15F69BDD7 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9F147F24E9462C77D359242F /* Security.framework */; };
@@ -42,6 +43,7 @@
 		72A00A9E2FD00D724D0F67ED /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9EF71329A1C7CC7EDC8C611B /* AudioToolbox.framework */; };
 		73023ACB2FFE95A8E3966AEC /* ios_fatal.m in Sources */ = {isa = PBXBuildFile; fileRef = D2F533B0436CB9A6860B0CDF /* ios_fatal.m */; };
 		741FA5F59D121B93F2D2392F /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CC068F6D19C4D3A25A2F1769 /* QuartzCore.framework */; };
+		78DE31ED599564253BD12D50 /* ios_mouse.m in Sources */ = {isa = PBXBuildFile; fileRef = BD13EC7DC167E63BA83A9EBB /* ios_mouse.m */; };
 		840DF7FBBCC199983E43949D /* Q3EVR.m in Sources */ = {isa = PBXBuildFile; fileRef = 04DCD76BF71B991FD24804E6 /* Q3EVR.m */; };
 		867E7497BB7D372071DC5E2A /* Assets-visionos.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DF4F3136705C2198860DC481 /* Assets-visionos.xcassets */; };
 		881A40E6C93FCC05BD94B4FC /* ios_onboarding.m in Sources */ = {isa = PBXBuildFile; fileRef = 67B95E936A35BC4D99C250A7 /* ios_onboarding.m */; };
@@ -104,6 +106,7 @@
 		AB8F52D7E98B32EC7FA91D30 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		ADA1A34160030BC3CE5DEB4B /* Q3ESense.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Q3ESense.h; sourceTree = "<group>"; };
 		B37EAC3671887DAF3EDA3E61 /* ARKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ARKit.framework; path = System/Library/Frameworks/ARKit.framework; sourceTree = SDKROOT; };
+		BD13EC7DC167E63BA83A9EBB /* ios_mouse.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ios_mouse.m; sourceTree = "<group>"; };
 		C5D108124494B7628C9E0274 /* AppShell_vision.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AppShell_vision.h; sourceTree = "<group>"; };
 		CC068F6D19C4D3A25A2F1769 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
 		CDB03F055C45BB54AD8A402B /* CoreVideo.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreVideo.framework; path = System/Library/Frameworks/CoreVideo.framework; sourceTree = SDKROOT; };
@@ -115,6 +118,7 @@
 		D9CE7C66352300892A1B6B0D /* AppShell.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AppShell.m; sourceTree = "<group>"; };
 		D9F737A370AC9EC1DA18DABF /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		DC9C85CCB2D7E73FBDF9A8F5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		DEEFB6ED6DE9D5F43C9A34AA /* ios_mouse.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ios_mouse.h; sourceTree = "<group>"; };
 		DF213318E4DAFCD0E633FEA8 /* Quake3e.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Quake3e.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DF4F3136705C2198860DC481 /* Assets-visionos.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Assets-visionos.xcassets"; sourceTree = "<group>"; };
 		E45895A54BB1884716BCCD15 /* Quake3e-visionOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Quake3e-visionOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -236,6 +240,8 @@
 				2613F93EAAD8CEB8ADDA6187 /* ios_input.h */,
 				64B9DA38E4711DA3D1DAD406 /* ios_input.m */,
 				E49EC9B3284D1B2BC896644E /* ios_metal.m */,
+				DEEFB6ED6DE9D5F43C9A34AA /* ios_mouse.h */,
+				BD13EC7DC167E63BA83A9EBB /* ios_mouse.m */,
 				67B95E936A35BC4D99C250A7 /* ios_onboarding.m */,
 				D4DDA206E2BDB5EC07102DF5 /* ios_pakman.m */,
 				248D5F9516594A2CDD56EBF2 /* ios_settings.h */,
@@ -379,6 +385,7 @@
 				F821306993D95659E95D50C3 /* ios_glue.c in Sources */,
 				D89976254862A86FF580079F /* ios_input.m in Sources */,
 				5C4877EB156210EB0C2FF86A /* ios_metal.m in Sources */,
+				1ACE7E0D587D70E58B1564BA /* ios_mouse.m in Sources */,
 				FBCCF806D1062426643D4910 /* ios_onboarding.m in Sources */,
 				4DA5987CCF2945560F1EE986 /* ios_pakman.m in Sources */,
 				AC1D3F3BE6B90C19682C7352 /* ios_settings.m in Sources */,
@@ -403,6 +410,7 @@
 				3EF3A7E612ACC72480EF43CC /* ios_glue.c in Sources */,
 				3C6B2D17CB34D2093C4CF687 /* ios_input.m in Sources */,
 				8891BBB02A45CF2D1FEADA8D /* ios_metal.m in Sources */,
+				78DE31ED599564253BD12D50 /* ios_mouse.m in Sources */,
 				881A40E6C93FCC05BD94B4FC /* ios_onboarding.m in Sources */,
 				07119F7EB457E79779350383 /* ios_pakman.m in Sources */,
 				29603872B366A1CDE089C17A /* ios_settings.m in Sources */,
