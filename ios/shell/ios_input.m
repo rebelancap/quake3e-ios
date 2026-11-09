@@ -1206,12 +1206,20 @@ static BOOL q3e_hwkey(long code, NSString *chars, NSString *charsIgn, UIKeyModif
 }
 
 static void q3e_kbd_repeat_frame(void) {
-    if (!kbd_rep.active || (q3e_hwfault & Q3E_FAULT_NOREPEAT)) return;
     const double now = CACurrentMediaTime();
+    // The frame loop stopped for a while (app backgrounded, scene inactive):
+    // the key-up may never have been delivered, so the hold cannot be trusted.
+    static double last_frame;
+    const double gap = now - last_frame;
+    last_frame = now;
+    if (gap > 0.5) kbd_rep.active = 0;
+    if (!kbd_rep.active || (q3e_hwfault & Q3E_FAULT_NOREPEAT)) return;
     if (!q3e_text_context()) {
-        // Held in gameplay or a plain menu: a held key, nothing more. Restart
-        // the delay so walking into a text field does not burst.
-        kbd_rep.next = now + KBD_REPEAT_DELAY;
+        // Held in gameplay or a plain menu: a held key, nothing more — and it
+        // stays that way. A key that is still down when a text field or the
+        // console takes over (W held while opening the console) must not start
+        // typing; only a press made inside a text context repeats.
+        kbd_rep.active = 0;
         return;
     }
     for (int n = 0; n < 2 && now >= kbd_rep.next; n++) {
