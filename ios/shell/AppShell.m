@@ -6,6 +6,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import "ios_input.h"
+#import "ios_mouse.h"
 
 extern CAMetalLayer *q3e_layer;              // ios_metal.m
 void Q3E_SetDocumentsPath(const char *path); // ios_glue.c
@@ -62,7 +63,14 @@ void Q3E_Shell_SetFPSCounter(int enabled) {
 - (void)loadView {
     self.view = [[Q3EInputView alloc] init];
     self.view.backgroundColor = [UIColor blackColor];
+    Q3E_Mouse_Start(self);   // GCMouse layer; this VC answers the pointer-lock question
 }
+// iPadOS asks the window's root view controller. Wanted only in game with a
+// hardware mouse connected; ios_mouse.m re-asks (setNeedsUpdateOfPrefersPointerLocked)
+// whenever the answer changes, on scene activation, and about once a second
+// while it is wanted but not granted. Granted only to a full-screen scene, and
+// only with UIApplicationSupportsIndirectInputEvents in Info.plist.
+- (BOOL)prefersPointerLocked { return Q3E_Mouse_WantsPointerLock() != 0; }
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {

@@ -312,6 +312,16 @@ void Q3E_QueueJoyAxis(int axis, int value) {
 	q3e_prod_push(Q3E_PROD_JOYAXIS, axis, value);
 }
 
+// SE_KEY downs queued per engine key, for the q3e_mouse diagnostics and the
+// simulator suite (which needs to count, e.g., that one left click produced
+// exactly one MOUSE1). Diagnostic only: plain ints, read racily.
+static int q3e_keydown_count[MAX_KEYS];
+
+int Q3E_KeyDownCount(const char *name) {
+	const int key = Key_StringToKeynum(name);
+	return (key > 0 && key < MAX_KEYS) ? q3e_keydown_count[key] : -1;
+}
+
 void Q3E_QueueNamedKey(const char *name, int down) {
 	int key;
 	// K_CONSOLE has no entry in the engine's keynames table (nothing binds it),
@@ -323,6 +333,9 @@ void Q3E_QueueNamedKey(const char *name, int down) {
 		key = Key_StringToKeynum(name);
 	}
 	if (key > 0) {
+		if (down && key < MAX_KEYS) {
+			q3e_keydown_count[key]++;
+		}
 		q3e_prod_push(Q3E_PROD_KEY, key, down ? 1 : 0);
 	}
 }
@@ -466,6 +479,56 @@ static void Q3E_KbdPaste_f(void) {
 // Paste: a UIToolbar item is untappable from a script.
 static void Q3E_KbdDismiss_f(void) {
 	Q3E_Keyboard_Dismiss();
+}
+
+// ---- hardware mouse / keyboard surface (ios_mouse.m, ios_input.m) ----
+#include "ios_mouse.h"
+void Q3E_Keyboard_HwCmd(int argc, const char **argv);   // ios_input.m
+
+#define Q3E_MAX_CMD_ARGS 16
+static int q3e_cmd_argv(const char **argv) {
+	int n = Cmd_Argc();
+	if (n > Q3E_MAX_CMD_ARGS) {
+		n = Q3E_MAX_CMD_ARGS;
+	}
+	for (int i = 0; i < n; i++) {
+		argv[i] = Cmd_Argv(i);
+	}
+	return n;
+}
+
+// Everything the mouse path depends on, for a player to paste.
+static void Q3E_MouseDiag_f(void) {
+	const char *argv[Q3E_MAX_CMD_ARGS];
+	const int argc = q3e_cmd_argv(argv);
+	Q3E_Mouse_Cmd(argc, argv);
+}
+
+static void Q3E_FakeMouse_f(void) {
+	const char *argv[Q3E_MAX_CMD_ARGS];
+	const int argc = q3e_cmd_argv(argv);
+	Q3E_Mouse_Fake(argc, argv);
+}
+
+static void Q3E_HwFault_f(void) {
+	const char *argv[Q3E_MAX_CMD_ARGS];
+	const int argc = q3e_cmd_argv(argv);
+	Q3E_HwFault_Cmd(argc, argv);
+}
+
+// A hardware keystroke entered at the press router (with its UIKey fields).
+static void Q3E_KbdHw_f(void) {
+	const char *argv[Q3E_MAX_CMD_ARGS];
+	int argc = q3e_cmd_argv(argv);
+	char rest[MAX_STRING_CHARS];
+	// "type"/"both"/"textfirst" take the rest of the line verbatim (spaces included).
+	if (argc >= 3 && (!strcmp(argv[1], "type") || !strcmp(argv[1], "both") ||
+	                  !strcmp(argv[1], "textfirst"))) {
+		Q_strncpyz(rest, Cmd_ArgsFrom(2), sizeof(rest));
+		argv[2] = rest;
+		argc = 3;
+	}
+	Q3E_Keyboard_HwCmd(argc, argv);
 }
 
 // ---- boot + frame (called from AppShell.m) ----
@@ -716,6 +779,10 @@ void Q3E_BootEngine(void) {
 	Cmd_AddCommand("q3ekbdkey", Q3E_KbdKey_f);
 	Cmd_AddCommand("q3ekbdpaste", Q3E_KbdPaste_f);
 	Cmd_AddCommand("q3ekbddismiss", Q3E_KbdDismiss_f);
+	Cmd_AddCommand("q3ekbdhw", Q3E_KbdHw_f);
+	Cmd_AddCommand("q3e_mouse", Q3E_MouseDiag_f);
+	Cmd_AddCommand("q3e_fakemouse", Q3E_FakeMouse_f);
+	Cmd_AddCommand("q3e_hwfault", Q3E_HwFault_f);
 	q3e_booted = qtrue;
 	if (q3e_migration_level() < Q3E_MIGRATION_LEVEL) {
 		q3e_set_migration_level(Q3E_MIGRATION_LEVEL);

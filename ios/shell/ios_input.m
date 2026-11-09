@@ -23,6 +23,7 @@
 // engine-facing goes through ios_glue.c shims.
 
 #import "ios_input.h"
+#import "ios_mouse.h"
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CABase.h>   // CACurrentMediaTime
 #import <GameController/GameController.h>
@@ -130,6 +131,9 @@ volatile int q3e_gyro_suppressed = 0;
 
 static void gyro_poll(int menuMode, float dt) {
     if (gyro_scale <= 0.0f || !gyro_mgr || menuMode || q3e_gyro_suppressed) return;
+    // A connected mouse owns aim; gyro on top of it would drift the crosshair
+    // whenever the iPad on the desk is nudged.
+    if (Q3E_Mouse_Present()) return;
     CMDeviceMotion *m = gyro_mgr.deviceMotion;
     if (!m) return;
     // rotationRate is a per-SECOND rate, so scale by real dt (normalized to
@@ -161,7 +165,8 @@ static void gyro_poll(int menuMode, float dt) {
 
 // ---- menu tap sequencer ----
 typedef struct {
-    int kind; // 0 = reset delta, 1 = target delta + M1 down, 2 = M1 up
+    int kind; // 0 = reset delta, 1 = target delta + M1 down, 2 = M1 up,
+              // 3 = target delta only (hover anchor), 4 = relative move (hover follow)
     int tx, ty;
 } tapstep_t;
 
@@ -170,6 +175,14 @@ static tapstep_t tapsteps[MAX_TAPSTEPS];
 static int tapstep_head, tapstep_tail;
 
 static void tapstep_push(int kind, int tx, int ty) {
+    // Relative hover moves fold into a still-queued relative move: a 120 Hz
+    // hover stream must not fill the sequencer, and a sum is the same motion.
+    if (kind == 4 && tapstep_head > tapstep_tail &&
+        tapsteps[(tapstep_head - 1) % MAX_TAPSTEPS].kind == 4) {
+        tapsteps[(tapstep_head - 1) % MAX_TAPSTEPS].tx += tx;
+        tapsteps[(tapstep_head - 1) % MAX_TAPSTEPS].ty += ty;
+        return;
+    }
     if (tapstep_head - tapstep_tail >= MAX_TAPSTEPS) return;
     tapsteps[tapstep_head % MAX_TAPSTEPS] = (tapstep_t){kind, tx, ty};
     tapstep_head++;
@@ -183,6 +196,8 @@ static void tapstep_drain_one(void) {
         case 0: Q3E_QueueMouse(-4000, -4000); break;
         case 1: Q3E_QueueMouse(s.tx, s.ty); Q3E_QueueNamedKey("MOUSE1", 1); break;
         case 2: Q3E_QueueNamedKey("MOUSE1", 0); break;
+        case 3: Q3E_QueueMouse(s.tx, s.ty); break;
+        case 4: if (s.tx || s.ty) Q3E_QueueMouse(s.tx, s.ty); break;
     }
 }
 
@@ -202,6 +217,10 @@ static float menu_rep_x, menu_rep_y;          // auto-repeat countdown (seconds)
 static int   menu_btnA, menu_btnB, menu_btnX; // A/B/X held states in menu mode
 static float menu_curx, menu_cury;            // right-stick UI-cursor sub-pixel accum
 static int   menu_click;                       // RT → MOUSE1 (click) state in menus
+// Hover follow (hardware pointer in menus): where this layer last PUT the q3
+// cursor, in the UI's delta space. Valid only while nothing else has moved it.
+static int   hover_anchor_valid;
+static int   hover_anchor_x, hover_anchor_y;
 
 static float apply_curve(float m) {
     return 0.4f * m + 0.6f * m * m * m;
@@ -597,7 +616,10 @@ static void pad_poll(int menuMode, float dt) {
         menu_curx += rx * fabsf(rx) * MENU_CURSOR_SPEED * cur_dt;
         menu_cury += -ry * fabsf(ry) * MENU_CURSOR_SPEED * cur_dt;
         int cdx = (int)menu_curx, cdy = (int)menu_cury;
-        if (cdx || cdy) { menu_curx -= cdx; menu_cury -= cdy; Q3E_QueueMouse(cdx, cdy); }
+        if (cdx || cdy) {
+            menu_curx -= cdx; menu_cury -= cdy; Q3E_QueueMouse(cdx, cdy);
+            hover_anchor_valid = 0;   // the q3 cursor moved under the hover estimate
+        }
         pad_button(&menu_click, s.menuClick, "MOUSE1");
     }
 }
@@ -816,6 +838,8 @@ void Q3E_VR_SenseInputFrame(float dt) {
 }
 #endif // TARGET_OS_VISION
 
+static void q3e_kbd_repeat_frame(void);   // hardware key repeat, below
+
 void Q3E_Input_Frame(void) {
     // real per-callback dt (seconds) for frame-rate-independent look accel
     static double lastT = 0.0;
@@ -825,6 +849,10 @@ void Q3E_Input_Frame(void) {
     if (dt <= 0.0f || dt > 0.1f) dt = 1.0f / 120.0f; // first-frame / hitch clamp
 
     const int menuMode = Q3E_MenuMode();
+#if !TARGET_OS_VISION
+    Q3E_Mouse_Frame(menuMode);
+#endif
+    q3e_kbd_repeat_frame();
     tapstep_drain_one();
 #if TARGET_OS_VISION
     // BEFORE the pad layer, always: it is the consumer that owns the turn seam
@@ -1025,6 +1053,177 @@ static const char *q3e_keyname_for(UIKeyboardHIDUsage code, NSString *chars,
     return NULL;
 }
 
+// ---- hardware keystrokes: characters, de-duplication, repeat (issue #5) ------
+// A real iPad keyboard reached the engine as KEY events only: the press handler
+// below consumes the UIPress (it must — that is how binds and menu navigation
+// work) and UIKit generates text input only for a press forwarded up the
+// responder chain, so -insertText: never ran and the player-name field ignored
+// typing. The press handler therefore produces the character itself, from
+// UIKey.characters (shift and caps lock applied, as typed).
+//
+// Insurance against the opposite case — UIKit ALSO delivering the same
+// keystroke through -insertText:/-deleteBackward — each path records the
+// characters it sent for a moment, and a character the other path already sent
+// within that window is dropped, in either order. Soft-keyboard taps and Paste
+// have no press, so nothing is ever recorded against them.
+//
+// UIKit does not repeat UIPress for a held key, so text contexts get key repeat
+// here (desktop timings); never in gameplay, where a held key is a held key.
+#define KBD_DEDUPE_WINDOW 0.25
+#define KBD_PEND_MAX      16
+#define KBD_REPEAT_DELAY  0.40
+#define KBD_REPEAT_RATE   0.03
+typedef struct { int ch; double t; } kbd_pend_t;
+static kbd_pend_t kbd_fromPress[KBD_PEND_MAX], kbd_fromText[KBD_PEND_MAX];
+static int kbd_fromPress_n, kbd_fromText_n;
+static int kbd_hwChars = 0;            // SE_CHAR events generated by the press path
+static int kbd_dedup = 0;              // characters dropped as the other path's duplicate
+static int kbd_repeats = 0;            // repeat events emitted for a held key
+static long kbd_skipUpCode = -1;       // a down dropped as a duplicate: drop its up too
+
+static struct {
+    int active;
+    long code;
+    unichar ign;
+    char name[24];
+    int ch;                            // character it types, -1 none (arrows)
+    double next;
+} kbd_rep;
+
+static void kbd_pend_expire(kbd_pend_t *q, int *n, double now) {
+    int w = 0;
+    for (int i = 0; i < *n; i++)
+        if (now - q[i].t < KBD_DEDUPE_WINDOW) q[w++] = q[i];
+    *n = w;
+}
+
+static int kbd_pend_take(kbd_pend_t *q, int *n, int ch, double now) {
+    kbd_pend_expire(q, n, now);
+    for (int i = 0; i < *n; i++) {
+        if (q[i].ch != ch) continue;
+        memmove(&q[i], &q[i + 1], (size_t)(*n - i - 1) * sizeof(*q));
+        (*n)--;
+        return 1;
+    }
+    return 0;
+}
+
+static void kbd_pend_add(kbd_pend_t *q, int *n, int ch, double now) {
+    kbd_pend_expire(q, n, now);
+    if (*n == KBD_PEND_MAX) { memmove(&q[0], &q[1], (size_t)(KBD_PEND_MAX - 1) * sizeof(*q)); (*n)--; }
+    q[*n].ch = ch; q[*n].t = now; (*n)++;
+}
+
+// YES = this path sends the character; NO = the other path already did.
+static BOOL kbd_claim_from_press(int ch) {
+    if (q3e_hwfault & Q3E_FAULT_NODEDUPE) return YES;
+    const double now = CACurrentMediaTime();
+    if (kbd_pend_take(kbd_fromText, &kbd_fromText_n, ch, now)) { kbd_dedup++; return NO; }
+    kbd_pend_add(kbd_fromPress, &kbd_fromPress_n, ch, now);
+    return YES;
+}
+
+static BOOL kbd_claim_from_text(int ch) {
+    if (q3e_hwfault & Q3E_FAULT_NODEDUPE) return YES;
+    const double now = CACurrentMediaTime();
+    if (kbd_pend_take(kbd_fromPress, &kbd_fromPress_n, ch, now)) { kbd_dedup++; return NO; }
+    // While a hardware key is held and repeating here, a text-path copy of the
+    // same character is UIKit's own repeat of it.
+    if (kbd_rep.active && kbd_rep.ch == ch) { kbd_dedup++; return NO; }
+    kbd_pend_add(kbd_fromText, &kbd_fromText_n, ch, now);
+    return YES;
+}
+
+static int q3e_text_context(void) {
+    if (q3e_hwfault & Q3E_FAULT_ANYREPEAT) return 1;
+    return Q3E_TextInputWanted() || (Q3E_KeyCatcher() & 1 /* KEYCATCH_CONSOLE */);
+}
+
+// One hardware key edge, as UIKit reports it in a UIPress. Shared by
+// -routePresses: and the q3ekbdhw injector, so the simulator drives the very
+// code a keyboard does. Returns NO for a key the engine has no name for.
+static BOOL q3e_hwkey(long code, NSString *chars, NSString *charsIgn, UIKeyModifierFlags mods, BOOL down) {
+    char one[2];
+    const char *name = q3e_keyname_for((UIKeyboardHIDUsage)code, charsIgn, one, sizeof(one));
+    if (!name) return NO;
+    const unichar ign = charsIgn.length ? [charsIgn characterAtIndex:0] : 0;
+
+    if (!down) {
+        if (kbd_rep.active && kbd_rep.code == code && kbd_rep.ign == ign) kbd_rep.active = 0;
+        if (kbd_skipUpCode == code) { kbd_skipUpCode = -1; return YES; }
+        Q3E_QueueNamedKey(name, 0);
+        kbd_keyEvents++;
+        kbd_seq++;
+        snprintf(kbd_last, sizeof(kbd_last), "key:%s:up", name);
+        return YES;
+    }
+
+    // The character this keystroke types, if any. Not with Command/Control held
+    // (shortcuts), not for the console key (it toggles the console; typing its
+    // ` into the console it just opened is what SDL filters on desktop too).
+    int ch = -1;
+    if (!strcmp(name, "ENTER")) ch = '\n';
+    else if (!strcmp(name, "BACKSPACE")) ch = 8;
+    else if (code != UIKeyboardHIDUsageKeyboardGraveAccentAndTilde &&
+             !(mods & (UIKeyModifierCommand | UIKeyModifierControl)) && chars.length == 1) {
+        const unichar c = [chars characterAtIndex:0];
+        if (c >= 32 && c < 127) ch = c;
+    }
+    if (ch >= 0 && !kbd_claim_from_press(ch)) {
+        kbd_skipUpCode = code;           // the text path already delivered this keystroke
+        return YES;
+    }
+
+    Q3E_QueueNamedKey(name, 1);
+    kbd_keyEvents++;
+    kbd_seq++;
+    snprintf(kbd_last, sizeof(kbd_last), "key:%s:down", name);
+    // BACKSPACE is a CHARACTER to this engine, not a key: Field_KeyDownEvent
+    // has no K_BACKSPACE case at all, and Field_CharEvent does the deleting
+    // when it sees ctrl-h (8) — which is what SDL delivers on desktop. The
+    // key event still goes out for binds and for menu code that reads it.
+    if (ch == 8) {
+        Q3E_QueueChar(8);
+        kbd_charEvents++;
+    } else if (ch >= 32 && !(q3e_hwfault & Q3E_FAULT_NOCHARS)) {
+        Q3E_QueueChar(ch);
+        kbd_charEvents++;
+        kbd_hwChars++;
+        snprintf(kbd_last, sizeof(kbd_last), "hwchar:%c", (char)ch);
+    }
+
+    const BOOL arrow = code == UIKeyboardHIDUsageKeyboardLeftArrow || code == UIKeyboardHIDUsageKeyboardRightArrow ||
+                       code == UIKeyboardHIDUsageKeyboardUpArrow || code == UIKeyboardHIDUsageKeyboardDownArrow;
+    if (ch == 8 || ch >= 32 || arrow) {
+        kbd_rep.active = 1;
+        kbd_rep.code = code;
+        kbd_rep.ign = ign;
+        strlcpy(kbd_rep.name, name, sizeof(kbd_rep.name));
+        kbd_rep.ch = (ch >= 32 && (q3e_hwfault & Q3E_FAULT_NOCHARS)) ? -1 : ch;
+        kbd_rep.next = CACurrentMediaTime() + KBD_REPEAT_DELAY;
+    }
+    return YES;
+}
+
+static void q3e_kbd_repeat_frame(void) {
+    if (!kbd_rep.active || (q3e_hwfault & Q3E_FAULT_NOREPEAT)) return;
+    const double now = CACurrentMediaTime();
+    if (!q3e_text_context()) {
+        // Held in gameplay or a plain menu: a held key, nothing more. Restart
+        // the delay so walking into a text field does not burst.
+        kbd_rep.next = now + KBD_REPEAT_DELAY;
+        return;
+    }
+    for (int n = 0; n < 2 && now >= kbd_rep.next; n++) {
+        Q3E_QueueNamedKey(kbd_rep.name, 1);   // a down while down = an engine repeat
+        if (kbd_rep.ch >= 0 && kbd_rep.ch != '\n') { Q3E_QueueChar(kbd_rep.ch); kbd_charEvents++; }
+        kbd_repeats++;
+        kbd_seq++;
+        kbd_rep.next += KBD_REPEAT_RATE;
+    }
+    if (now >= kbd_rep.next) kbd_rep.next = now + KBD_REPEAT_RATE;   // fell behind: do not burst
+}
+
 @interface Q3EInputView () <UIKeyInput>
 @end
 
@@ -1050,6 +1249,8 @@ static const char *q3e_keyname_for(UIKeyboardHIDUsage code, NSString *chars,
     NSTimer *_modeTimer;
     BOOL _menuMode;
     BOOL _padConnected;
+    BOOL _desktop;              // hardware mouse AND keyboard: touch controls hidden in game
+    NSMutableSet<UITouch *> *_ignoredTouches;   // pointer touches the mouse layer owns
     UIToolbar *_kbToolbar;
     UIView *_kbSuppressView;   // zero-size stand-in input view: first responder, no keyboard
 }
@@ -1145,22 +1346,8 @@ static const char *q3e_keyname_for(UIKeyboardHIDUsage code, NSString *chars,
     for (UIPress *p in presses) {
         UIKey *k = p.key;
         if (!k) continue;
-        char one[2];
-        const char *name = q3e_keyname_for(k.keyCode, k.charactersIgnoringModifiers, one, sizeof(one));
-        if (!name) continue;
-        Q3E_QueueNamedKey(name, down ? 1 : 0);
-        kbd_keyEvents++;
-        kbd_seq++;
-        snprintf(kbd_last, sizeof(kbd_last), "key:%s:%s", name, down ? "down" : "up");
-        // BACKSPACE is a CHARACTER to this engine, not a key: Field_KeyDownEvent
-        // has no K_BACKSPACE case at all, and Field_CharEvent does the deleting
-        // when it sees ctrl-h (8) — which is what SDL delivers on desktop. The
-        // key event still goes out for binds and for menu code that reads it.
-        if (down && !strcmp(name, "BACKSPACE")) {
-            Q3E_QueueChar(8);
-            kbd_charEvents++;
-        }
-        handled = YES;
+        if (q3e_hwkey((long)k.keyCode, k.characters, k.charactersIgnoringModifiers, k.modifierFlags, down))
+            handled = YES;
     }
     return handled;
 }
@@ -1268,11 +1455,13 @@ static const char *q3e_keyname_for(UIKeyboardHIDUsage code, NSString *chars,
     for (NSUInteger i = 0; i < text.length; i++) {
         unichar c = [text characterAtIndex:i];
         if (c == '\n' || c == '\r') {
+            if (!kbd_claim_from_text('\n')) continue;   // the press already sent ENTER
             Q3E_QueueNamedKey("ENTER", 1);
             Q3E_QueueNamedKey("ENTER", 0);
             kbd_keyEvents++;
             snprintf(kbd_last, sizeof(kbd_last), "key:ENTER:tap");
-        } else if (c >= 32 && c < 128) {
+        } else if (c >= 32 && c < 127) {
+            if (!kbd_claim_from_text((int)c)) continue;   // the press already typed it
             Q3E_QueueChar((int)c);
             kbd_charEvents++;
             snprintf(kbd_last, sizeof(kbd_last), "char:%c", (char)c);
@@ -1282,6 +1471,7 @@ static const char *q3e_keyname_for(UIKeyboardHIDUsage code, NSString *chars,
 }
 
 - (void)deleteBackward {
+    if (!kbd_claim_from_text(8)) return;   // the press already deleted
     Q3E_QueueNamedKey("BACKSPACE", 1);
     Q3E_QueueChar(8);   // the char is what actually deletes — see routePresses
     Q3E_QueueNamedKey("BACKSPACE", 0);
@@ -1369,6 +1559,16 @@ static const char *q3e_keyname_for(UIKeyboardHIDUsage code, NSString *chars,
             NSLog(@"Q3E gyro aim enabled, scale %.2f", gyro_scale);
         }
         _oneShotTouches = [NSMutableSet set];
+        _ignoredTouches = [NSMutableSet set];
+#if !TARGET_OS_VISION
+        // Hover follow: with a hardware pointer in a menu, the q3 cursor tracks
+        // the system pointer (see -hoverAt:began:). iOS only — on visionOS a
+        // hover is where the player LOOKS, which must not drag the cursor.
+        UIHoverGestureRecognizer *hover = [[UIHoverGestureRecognizer alloc]
+            initWithTarget:self action:@selector(hoverChanged:)];
+        hover.cancelsTouchesInView = NO;
+        [self addGestureRecognizer:hover];
+#endif
         _stickBase = [self circleLayer:STICK_RADIUS alpha:0.14];
         _stickNub = [self circleLayer:NUB_RADIUS alpha:0.28];
         _fireCircle = [self circleLayer:FIRE_RADIUS alpha:0.20];
@@ -1662,18 +1862,23 @@ static CGFloat q3e_menu_hit_radius(void) {
     static int ignore_pad = -1;
     if (ignore_pad < 0) ignore_pad = getenv("Q3E_IGNORE_PAD") ? 1 : 0;
     BOOL pad = !ignore_pad && GCController.controllers.count > 0;
-    if (menu != _menuMode || pad != _padConnected) {
+    // A hardware mouse AND keyboard is a desktop setup: the on-screen controls
+    // only get in the way. A mouse alone keeps them (no keyboard to move with).
+    BOOL desktop = Q3E_Mouse_DesktopMode() != 0;
+    if (menu != _menuMode) hover_anchor_valid = 0;
+    if (menu != _menuMode || pad != _padConnected || desktop != _desktop) {
         _menuMode = menu;
         _padConnected = pad;
+        _desktop = desktop;
         // touch game controls vanish in menus AND while a controller is
         // connected (menu taps stay active either way)
-        BOOL hideGameControls = menu || pad;
+        BOOL hideGameControls = menu || pad || desktop;
         _fireCircle.hidden = _jumpCircle.hidden = hideGameControls;
         _wnextCircle.hidden = _wprevCircle.hidden = _crouchCircle.hidden = hideGameControls;
         // ≡ (ESC/Start): hide when a controller is connected — it has its own menu
         // button — EXCEPT keep it in menus as a pinch-to-Esc escape hatch (so a flaky
         // controller can't strand you in a menu).
-        _menuButton.hidden = pad && !menu;
+        _menuButton.hidden = (pad || desktop) && !menu;
         // ⚙ (settings): visible whenever a menu is up, for every input.
         _gearButton.hidden = !menu;
         if (hideGameControls) {
@@ -1711,7 +1916,48 @@ static void q3e_kbd_note_touch(void) {
 #endif
 }
 
+// Which hardware-pointer touches the touch layer must NOT see. A mouse click is
+// delivered BOTH as a GCMouse button and as a UITouchTypeIndirectPointer touch:
+//   * in game with a mouse connected, every pointer touch belongs to the mouse
+//     layer (otherwise a click would also plant the stick or start a drag-look,
+//     and a drag would turn the view a second time, edge-bounded — issue #3);
+//   * in menus, only a PRIMARY click stays here (it is the absolute cursor warp
+//     + MOUSE1, and the mouse layer suppresses its own left press there); a
+//     secondary/middle click is MOUSE2/MOUSE3 from the mouse layer, so its touch
+//     must not ALSO click MOUSE1 (issue #4: "both buttons are Mouse 1").
+- (BOOL)ignorePointerTouchWithButtons:(NSInteger)buttonMask {
+#if TARGET_OS_VISION
+    (void)buttonMask;
+    return NO;
+#else
+    if (q3e_hwfault & Q3E_FAULT_NOFILTER) return NO;
+    // Live, not the 4 Hz _menuMode: a click in the quarter-second after a menu
+    // closes must not run the menu tap sequence (its corner reset would yank
+    // the view) in game.
+    if (!Q3E_MenuMode()) return Q3E_Mouse_Present() != 0;
+    return buttonMask != 0 && !(buttonMask & UIEventButtonMaskPrimary);
+#endif
+}
+
+- (NSSet<UITouch *> *)filterTouches:(NSSet<UITouch *> *)touches event:(UIEvent *)event began:(BOOL)began {
+#if TARGET_OS_VISION
+    return touches;
+#else
+    if (began) {
+        for (UITouch *t in touches)
+            if (t.type == UITouchTypeIndirectPointer && [self ignorePointerTouchWithButtons:event.buttonMask])
+                [_ignoredTouches addObject:t];
+    }
+    if (!_ignoredTouches.count) return touches;
+    return [touches objectsPassingTest:^BOOL(UITouch *t, BOOL *stop) {
+        return ![self->_ignoredTouches containsObject:t];
+    }];
+#endif
+}
+
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    touches = [self filterTouches:touches event:event began:YES];
+    if (!touches.count) return;
     q3e_kbd_note_touch();
     if (_editing) {
         CGPoint p = [touches.anyObject locationInView:self];
@@ -1745,8 +1991,8 @@ static void q3e_kbd_note_touch(void) {
             _tapStart = p;
             continue;
         }
-        if (_padConnected) {
-            continue; // controller owns gameplay input; touch stays menu-only
+        if (_padConnected || _desktop) {
+            continue; // controller / mouse+keyboard own gameplay input; touch stays menu-only
         }
         BOOL inMoveZone = [self pointInMoveZone:p];
         if (!_fireTouch && [self point:p inCircle:_fireCircle radius:FIRE_RADIUS * ctl_scale]) {
@@ -1784,6 +2030,8 @@ static void q3e_kbd_note_touch(void) {
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    touches = [self filterTouches:touches event:event began:NO];
+    if (!touches.count) return;
     if (_editing) {
         if (_dragCtl) {
             CGPoint p = [touches.anyObject locationInView:self];
@@ -1859,47 +2107,7 @@ static void q3e_kbd_note_touch(void) {
             }
             CGFloat dx = p.x - _tapStart.x, dy = p.y - _tapStart.y;
             if (dx * dx + dy * dy < TAP_SLOP * TAP_SLOP) {
-                // Candidate inverse transforms for the stock UI's virtual
-                // 640x480 cursor space, runtime-selectable via Q3E_UIMAP:
-                //   'c' centered 4:3 (ui_atoms.c widescreen bias — default)
-                //   'p' pure full-width stretch
-                //   'l' left-anchored 4:3 (bias applied to draw but not
-                //       cursor, or engine-side variants)
-                // Field calibration decides; theory has missed twice.
-                CGSize s = self.bounds.size;
-                CGFloat yscale = s.height / 480.0f;
-                CGFloat bias = 0.5f * (s.width - 640.0f * yscale);
-                if (bias < 0) bias = 0;
-                // Per-mod transform: each UI decides its own widescreen
-                // handling. id-lineage UIs (baseq3/TA/CPMA) center a 4:3
-                // region; UrT's TA-derived-but-forked UI stretches full
-                // width (field report: center-accurate, edge drift).
-                // Env Q3E_UIMAP > per-game default > 'c'.
-                char mode = uimap_mode;
-                if (!getenv("Q3E_UIMAP")) {
-                    const char *game = Q3E_CurrentGame();
-                    NSString *saved = [NSUserDefaults.standardUserDefaults stringForKey:
-                        [NSString stringWithFormat:@"q3e_uimap_%s", game]];
-                    if (saved.length) {
-                        mode = (char)[saved characterAtIndex:0];
-                    } else if (!strcmp(game, "q3ut4")) {
-                        mode = 'p';
-                    }
-                }
-                int tx;
-                switch (mode) {
-                    case 'p': tx = (int)(p.x / s.width * 640.0f); break;
-                    case 'l': tx = (int)(p.x / yscale); break;
-                    default:  tx = (int)((p.x - bias) / yscale); break;
-                }
-                int ty = (int)(p.y / s.height * 480.0f);
-                if (tx < 0) tx = 0;
-                if (tx > 640) tx = 640;
-                tapstep_push(0, 0, 0);
-                tapstep_push(1, (int)(tx * uidelta_mult), (int)(ty * uidelta_mult));
-                tapstep_push(2, 0, 0);
-                NSLog(@"Q3E tap[%c x%.1f] (%.0f,%.0f)pt -> ui(%d,%d) view %.0fx%.0f pad=%d",
-                      uimap_mode, uidelta_mult, p.x, p.y, tx, ty, s.width, s.height, (int)_padConnected);
+                [self menuTapAt:p];
             }
             continue;
         }
@@ -1937,7 +2145,116 @@ static void q3e_kbd_note_touch(void) {
     }
 }
 
+// The stock UI's virtual 640x480 cursor position for a point in this view, in
+// the delta space the sequencer sends (uidelta_mult applied). Shared by the
+// tap click and the hover follow, so the two can never disagree.
+- (void)uiTargetFor:(CGPoint)p tx:(int *)otx ty:(int *)oty {
+    // Candidate inverse transforms for the stock UI's virtual
+    // 640x480 cursor space, runtime-selectable via Q3E_UIMAP:
+    //   'c' centered 4:3 (ui_atoms.c widescreen bias — default)
+    //   'p' pure full-width stretch
+    //   'l' left-anchored 4:3 (bias applied to draw but not
+    //       cursor, or engine-side variants)
+    // Field calibration decides; theory has missed twice.
+    CGSize s = self.bounds.size;
+    CGFloat yscale = s.height / 480.0f;
+    CGFloat bias = 0.5f * (s.width - 640.0f * yscale);
+    if (bias < 0) bias = 0;
+    // Per-mod transform: each UI decides its own widescreen
+    // handling. id-lineage UIs (baseq3/TA/CPMA) center a 4:3
+    // region; UrT's TA-derived-but-forked UI stretches full
+    // width (field report: center-accurate, edge drift).
+    // Env Q3E_UIMAP > per-game default > 'c'.
+    char mode = uimap_mode;
+    if (!getenv("Q3E_UIMAP")) {
+        const char *game = Q3E_CurrentGame();
+        NSString *saved = [NSUserDefaults.standardUserDefaults stringForKey:
+            [NSString stringWithFormat:@"q3e_uimap_%s", game]];
+        if (saved.length) {
+            mode = (char)[saved characterAtIndex:0];
+        } else if (!strcmp(game, "q3ut4")) {
+            mode = 'p';
+        }
+    }
+    int tx;
+    switch (mode) {
+        case 'p': tx = (int)(p.x / s.width * 640.0f); break;
+        case 'l': tx = (int)(p.x / yscale); break;
+        default:  tx = (int)((p.x - bias) / yscale); break;
+    }
+    int ty = (int)(p.y / s.height * 480.0f);
+    if (tx < 0) tx = 0;
+    if (tx > 640) tx = 640;
+    if (ty < 0) ty = 0;
+    if (ty > 480) ty = 480;
+    *otx = (int)(tx * uidelta_mult);
+    *oty = (int)(ty * uidelta_mult);
+}
+
+- (void)menuTapAt:(CGPoint)p {
+    int tx, ty;
+    [self uiTargetFor:p tx:&tx ty:&ty];
+    tapstep_push(0, 0, 0);
+    tapstep_push(1, tx, ty);
+    tapstep_push(2, 0, 0);
+    // The sequencer just put the q3 cursor exactly here.
+    hover_anchor_valid = 1;
+    hover_anchor_x = tx; hover_anchor_y = ty;
+    CGSize s = self.bounds.size;
+    NSLog(@"Q3E tap[%c x%.1f] (%.0f,%.0f)pt -> ui(%d,%d) view %.0fx%.0f pad=%d",
+          uimap_mode, uidelta_mult, p.x, p.y, tx, ty, s.width, s.height, (int)_padConnected);
+}
+
+// Hover follow. The first sample (or the first after anything else moved the
+// q3 cursor) anchors it ABSOLUTELY with the same two-step corner-reset the tap
+// uses — the engine coalesces same-frame mouse events, so a reset and a target
+// can never share a frame; the sequencer runs one step per frame. After that,
+// each sample is a RELATIVE move from where this layer last put the cursor,
+// which coalesces harmlessly. Targets are clamped to the 640x480 field, inside
+// the UI's own clamp range, so the estimate cannot drift through a clamp.
+- (void)hoverAt:(CGPoint)p began:(BOOL)began {
+    if (!_menuMode || _editing || !Q3E_Mouse_Present()) return;
+    int tx, ty;
+    [self uiTargetFor:p tx:&tx ty:&ty];
+    if (began || !hover_anchor_valid) {
+        tapstep_push(0, 0, 0);
+        tapstep_push(3, tx, ty);
+    } else if (tx != hover_anchor_x || ty != hover_anchor_y) {
+        tapstep_push(4, tx - hover_anchor_x, ty - hover_anchor_y);
+    }
+    hover_anchor_valid = 1;
+    hover_anchor_x = tx; hover_anchor_y = ty;
+}
+
+#if !TARGET_OS_VISION
+- (void)hoverChanged:(UIHoverGestureRecognizer *)g {
+    if (g.state != UIGestureRecognizerStateBegan && g.state != UIGestureRecognizerStateChanged) return;
+    [self hoverAt:[g locationInView:self] began:g.state == UIGestureRecognizerStateBegan];
+}
+#endif
+
+// q3e_fakemouse pointerclick: an indirect-pointer click through the same filter
+// and the same tap path a real one takes.
+- (void)fakePointerClickAt:(CGPoint)p buttons:(NSInteger)mask {
+    if ([self ignorePointerTouchWithButtons:mask]) {
+        Com_Printf("FAKEPOINTER ignored (menu=%d buttons=%ld)\n", (int)_menuMode, (long)mask);
+        return;
+    }
+    if (_menuMode) {
+        [self menuTapAt:p];
+        Com_Printf("FAKEPOINTER menu tap\n");
+    } else {
+        Com_Printf("FAKEPOINTER game touch (no mouse layer)\n");
+    }
+}
+
+- (BOOL)gameControlsHidden { return _fireCircle.hidden; }
+
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    NSSet<UITouch *> *all = touches;
+    touches = [self filterTouches:touches event:event began:NO];
+    for (UITouch *t in all) [_ignoredTouches removeObject:t];
+    if (!touches.count) return;
     if (_editing) {
         // UIKit can deliver a final location in touchesEnded that the last
         // touchesMoved never carried; without this the control commits a few
@@ -2116,6 +2433,10 @@ static void q3e_kbd_note_touch(void) {
 }
 
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    NSSet<UITouch *> *all = touches;
+    touches = [self filterTouches:touches event:event began:NO];
+    for (UITouch *t in all) [_ignoredTouches removeObject:t];
+    if (!touches.count) return;
     if (_editing) { [self commitDrag]; return; }
     [self endTouches:touches];
 }
@@ -2148,11 +2469,13 @@ int Q3E_Keyboard_GetMode(void) { return kbd_mode; }
 
 void Q3E_Keyboard_DumpLine(char *out, int len) {
     snprintf(out, (size_t)len,
-             "resp=%d text=%d mode=%s dismissed=%d keys=%d chars=%d last=%s seq=%d",
+             "resp=%d text=%d mode=%s dismissed=%d keys=%d chars=%d hwchars=%d dedup=%d "
+             "repeats=%d held=%s last=%s seq=%d",
              (int)kbd_responder, (int)kbd_textMode,
              kbd_mode == 0 ? "auto" : (kbd_mode == 1 ? "on" : "off"),
              (int)kbd_dismissed,
-             kbd_keyEvents, kbd_charEvents, kbd_last, kbd_seq);
+             kbd_keyEvents, kbd_charEvents, kbd_hwChars, kbd_dedup, kbd_repeats,
+             kbd_rep.active ? kbd_rep.name : "-", kbd_last, kbd_seq);
 }
 
 // Tap the accessory bar's "Dismiss ⌨" button from the console — the only way to
@@ -2236,6 +2559,117 @@ void Q3E_Keyboard_InjectKey(const char *name, int down) {
         if (isDown && !strcmp(resolved, "BACKSPACE")) {
             Q3E_QueueChar(8);
             kbd_charEvents++;
+        }
+    });
+}
+
+// ---- hardware mouse / keyboard: the C surface for ios_mouse.m and the console --
+
+@interface Q3EInputView (HwInput)
+- (void)fakePointerClickAt:(CGPoint)p buttons:(NSInteger)mask;
+- (void)hoverAt:(CGPoint)p began:(BOOL)began;
+- (BOOL)gameControlsHidden;
+@end
+
+void Q3E_Input_FakePointerClick(float nx, float ny, int buttonMask) {
+    Q3EInputView *v = q3e_input_view;
+    if (!v) return;
+    CGSize s = v.bounds.size;
+    [v fakePointerClickAt:CGPointMake(nx * s.width, ny * s.height) buttons:buttonMask];
+}
+
+void Q3E_Input_FakeHover(float nx, float ny, int began) {
+    Q3EInputView *v = q3e_input_view;
+    if (!v) return;
+    CGSize s = v.bounds.size;
+    [v hoverAt:CGPointMake(nx * s.width, ny * s.height) began:began != 0];
+}
+
+int Q3E_Input_GameControlsHidden(void) {
+    Q3EInputView *v = q3e_input_view;
+    return v ? (int)[v gameControlsHidden] : -1;
+}
+
+// q3ekbdhw — a HARDWARE keystroke, entered at the press router (q3e_hwkey) with
+// the UIKey fields a real keyboard would carry. The simulator cannot deliver a
+// UIPress to a headless guest, so this is how the suite proves the press path
+// types characters (issue #5), types each exactly once even if UIKit also calls
+// -insertText: for it ("both"/"textfirst"), and repeats only in text contexts.
+//   q3ekbdhw down|up|tap <key>      key = one character ("a", "A" = shifted) or
+//                                   a key name (ENTER, BACKSPACE, LEFTARROW...)
+//   q3ekbdhw type <text>            tap every character
+//   q3ekbdhw both <text>            each: press path, then -insertText: too
+//   q3ekbdhw textfirst <text>       each: -insertText: first, then the press
+static BOOL q3e_hw_spec(NSString *spec, long *code, NSString **chars, NSString **ign,
+                        UIKeyModifierFlags *mods) {
+    *mods = 0;
+    if (spec.length == 1) {
+        unichar c = [spec characterAtIndex:0];
+        *chars = spec;
+        *code = 0;
+        if (c >= 'A' && c <= 'Z') {
+            *mods = UIKeyModifierShift;
+            *ign = [NSString stringWithCharacters:(unichar[]){ (unichar)(c - 'A' + 'a') } length:1];
+            *code = UIKeyboardHIDUsageKeyboardA + (c - 'A');
+        } else {
+            *ign = spec;
+            if (c >= 'a' && c <= 'z') *code = UIKeyboardHIDUsageKeyboardA + (c - 'a');
+            else if (c >= '1' && c <= '9') *code = UIKeyboardHIDUsageKeyboard1 + (c - '1');
+            else if (c == '0') *code = UIKeyboardHIDUsageKeyboard0;
+            else if (c == ' ') *code = UIKeyboardHIDUsageKeyboardSpacebar;
+        }
+        return YES;
+    }
+    for (size_t i = 0; i < sizeof(q3e_keymap) / sizeof(q3e_keymap[0]); i++) {
+        if (strcasecmp(q3e_keymap[i].name, spec.UTF8String)) continue;
+        *code = q3e_keymap[i].code;
+        *ign = @"";
+        *chars = @"";
+        if (*code == UIKeyboardHIDUsageKeyboardReturnOrEnter) *chars = *ign = @"\r";
+        if (*code == UIKeyboardHIDUsageKeyboardDeleteOrBackspace) *chars = *ign = @"\b";
+        return YES;
+    }
+    return NO;
+}
+
+void Q3E_Keyboard_HwCmd(int argc, const char **argv) {
+    if (argc < 3) {
+        Com_Printf("usage: q3ekbdhw down|up|tap <key> | type|both|textfirst <text>\n");
+        return;
+    }
+    Q3EInputView *v = q3e_input_view;
+    if (!v) return;
+    NSString *op = [NSString stringWithUTF8String:argv[1]];
+    NSString *arg = [NSString stringWithUTF8String:argv[2]];
+    if (!op || !arg) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // The same gate a real keyboard is under: no first responder, no presses.
+        if (kbd_mode == 2 || !v.isFirstResponder) {
+            Com_Printf("KBDHW REFUSED (responder=%d mode=%d)\n", (int)v.isFirstResponder, kbd_mode);
+            return;
+        }
+        long code; NSString *chars, *ign; UIKeyModifierFlags mods;
+        if ([op isEqualToString:@"down"] || [op isEqualToString:@"up"] || [op isEqualToString:@"tap"]) {
+            if (!q3e_hw_spec(arg, &code, &chars, &ign, &mods)) {
+                Com_Printf("KBDHW unknown key '%s'\n", arg.UTF8String);
+                return;
+            }
+            if (![op isEqualToString:@"up"])   q3e_hwkey(code, chars, ign, mods, YES);
+            if (![op isEqualToString:@"down"]) q3e_hwkey(code, chars, ign, mods, NO);
+            return;
+        }
+        const BOOL both = [op isEqualToString:@"both"], textFirst = [op isEqualToString:@"textfirst"];
+        if (!both && !textFirst && ![op isEqualToString:@"type"]) {
+            Com_Printf("KBDHW unknown op '%s'\n", op.UTF8String);
+            return;
+        }
+        for (NSUInteger i = 0; i < arg.length; i++) {
+            NSString *one = [arg substringWithRange:NSMakeRange(i, 1)];
+            if (!q3e_hw_spec(one, &code, &chars, &ign, &mods)) continue;
+            if (textFirst) [v insertText:one];
+            q3e_hwkey(code, chars, ign, mods, YES);
+            if (both) [v insertText:one];
+            q3e_hwkey(code, chars, ign, mods, NO);
         }
     });
 }
