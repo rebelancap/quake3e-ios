@@ -125,13 +125,19 @@ cat > "$DOCS/baseq3/autoexec.cfg" <<'CFG'
 seta com_maxfps 120
 seta cg_drawfps 0
 seta name KbdBaseline
+seta s_volume 0
+seta s_musicvolume 0
 CFG
 c=$(grep -c '^seta ' "$DOCS/baseq3/autoexec.cfg")
-[ "$c" = 3 ] || die "autoexec.cfg write asserted 3 seta lines, found $c"
+[ "$c" = 5 ] || die "autoexec.cfg write asserted 5 seta lines, found $c"
 
-echo "== launch"
+# Silent: nothing launched on this Mac may make sound. Muted twice, like
+# sim-verify-hwinput.sh: on the command line (before any sound plays) and in
+# autoexec.cfg above.
+echo "== launch (silent: s_volume 0 / s_musicvolume 0)"
 SIMCTL_CHILD_MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 \
 SIMCTL_CHILD_Q3E_CONSOLE=1 \
+SIMCTL_CHILD_Q3E_ARGS="+set s_volume 0 +set s_musicvolume 0" \
   xcrun simctl launch --terminate-running-process "$UDID" $BUNDLE >/dev/null || die "launch failed"
 
 echo "== waiting for the console bridge"

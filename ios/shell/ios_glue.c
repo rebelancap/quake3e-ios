@@ -504,6 +504,7 @@ static void Q3E_MouseDiag_f(void) {
 	Q3E_Mouse_Cmd(argc, argv);
 }
 
+#ifdef Q3E_DEV_BUILD   // test-only injectors; registered under the same gate below
 static void Q3E_FakeMouse_f(void) {
 	const char *argv[Q3E_MAX_CMD_ARGS];
 	const int argc = q3e_cmd_argv(argv);
@@ -530,6 +531,7 @@ static void Q3E_KbdHw_f(void) {
 	}
 	Q3E_Keyboard_HwCmd(argc, argv);
 }
+#endif // Q3E_DEV_BUILD
 
 // ---- boot + frame (called from AppShell.m) ----
 
@@ -779,10 +781,20 @@ void Q3E_BootEngine(void) {
 	Cmd_AddCommand("q3ekbdkey", Q3E_KbdKey_f);
 	Cmd_AddCommand("q3ekbdpaste", Q3E_KbdPaste_f);
 	Cmd_AddCommand("q3ekbddismiss", Q3E_KbdDismiss_f);
-	Cmd_AddCommand("q3ekbdhw", Q3E_KbdHw_f);
 	Cmd_AddCommand("q3e_mouse", Q3E_MouseDiag_f);
+#ifdef Q3E_DEV_BUILD
+	// Test-only: fake hardware keystrokes, fake mice and fault injection that
+	// deliberately disables input protections. They exist for
+	// sim-verify-hwinput.sh (build-ios-sim.sh always defines Q3E_DEV_BUILD)
+	// and dev OTA builds; a public build must not carry a command that can
+	// break the player's input. The older injectors above (q3ekbdtype/key/
+	// paste/dismiss, q3e_faketouch) have shipped since 1.1.0, only do what a
+	// player's own keyboard or finger can, and are needed by the
+	// public-configuration visionOS sim suites, so they stay registered.
+	Cmd_AddCommand("q3ekbdhw", Q3E_KbdHw_f);
 	Cmd_AddCommand("q3e_fakemouse", Q3E_FakeMouse_f);
 	Cmd_AddCommand("q3e_hwfault", Q3E_HwFault_f);
+#endif
 	q3e_booted = qtrue;
 	if (q3e_migration_level() < Q3E_MIGRATION_LEVEL) {
 		q3e_set_migration_level(Q3E_MIGRATION_LEVEL);
